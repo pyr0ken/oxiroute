@@ -6,6 +6,8 @@ use uuid::Uuid;
 pub struct AntigravityPart {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,7 +68,7 @@ impl AntigravityTranslator {
             let role = match msg.role {
                 Role::User => "user".to_string(),
                 Role::Assistant => "model".to_string(),
-                Role::System => "user".to_string(), // In Antigravity Gemini format, system prompts map to user turn or prefix
+                Role::System => "user".to_string(),
                 Role::Tool | Role::Function => "user".to_string(),
             };
 
@@ -74,12 +76,14 @@ impl AntigravityTranslator {
             if !text.is_empty() {
                 contents.push(AntigravityContent {
                     role,
-                    parts: vec![AntigravityPart { text: Some(text) }],
+                    parts: vec![AntigravityPart {
+                        text: Some(text),
+                        thought: None,
+                    }],
                 });
             }
         }
 
-        // Clean model name (strip "antigravity/" prefix if present)
         let clean_model = target_model
             .strip_prefix("antigravity/")
             .unwrap_or(target_model);
@@ -126,7 +130,6 @@ impl AntigravityTranslator {
     pub fn parse_chunk(raw_json: &str, model: &str, chunk_id: &str) -> Result<Option<ChatChunk>> {
         let val: serde_json::Value = serde_json::from_str(raw_json)?;
 
-        // Check if there is an error block
         if let Some(err) = val.get("error") {
             let msg = err
                 .get("message")
@@ -150,10 +153,17 @@ impl AntigravityTranslator {
             .and_then(|cnt| cnt.get("parts"));
 
         let mut accumulated_text = String::new();
+        let mut reasoning_text = String::new();
+
         if let Some(parts_arr) = parts.and_then(|p| p.as_array()) {
             for part in parts_arr {
+                let is_thought = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
                 if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                    accumulated_text.push_str(text);
+                    if is_thought {
+                        reasoning_text.push_str(text);
+                    } else {
+                        accumulated_text.push_str(text);
+                    }
                 }
             }
         }
@@ -167,7 +177,7 @@ impl AntigravityTranslator {
                 other => other.to_lowercase(),
             });
 
-        if accumulated_text.is_empty() && finish_reason.is_none() {
+        if accumulated_text.is_empty() && reasoning_text.is_empty() && finish_reason.is_none() {
             return Ok(None);
         }
 
@@ -184,6 +194,11 @@ impl AntigravityTranslator {
                         None
                     } else {
                         Some(accumulated_text)
+                    },
+                    reasoning_content: if reasoning_text.is_empty() {
+                        None
+                    } else {
+                        Some(reasoning_text)
                     },
                     ..Default::default()
                 },

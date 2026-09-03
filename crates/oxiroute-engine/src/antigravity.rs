@@ -6,10 +6,10 @@ use oxiroute_translator::AntigravityTranslator;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use uuid::Uuid;
 
-pub const PRIMARY_URL: &str =
-    "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
-pub const FALLBACK_URL: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
+pub const ENDPOINTS: &[&str] = &[
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+    "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+];
 
 pub struct AntigravityExecutor {
     client: reqwest::Client,
@@ -32,12 +32,13 @@ impl AntigravityExecutor {
         Ok(Self { client })
     }
 
-    pub async fn execute_stream(
+    async fn try_execute_endpoint(
         &self,
+        endpoint: &str,
         request: &ChatRequest,
         target_model: &str,
         account: &AntigravityAccount,
-    ) -> Result<impl Stream<Item = Result<ChatChunk>>> {
+    ) -> Result<reqwest::Response> {
         let envelope = AntigravityTranslator::build_envelope(
             request,
             target_model,
@@ -60,12 +61,12 @@ impl AntigravityExecutor {
 
         let response = self
             .client
-            .post(PRIMARY_URL)
-            .headers(headers.clone())
+            .post(endpoint)
+            .headers(headers)
             .json(&envelope)
             .send()
             .await
-            .map_err(|e| OxiError::Network(format!("Antigravity request failed: {}", e)))?;
+            .map_err(|e| OxiError::Network(format!("Network dispatch error: {}", e)))?;
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -76,35 +77,78 @@ impl AntigravityExecutor {
             return Err(OxiError::Provider {
                 status,
                 message: body_text,
-                is_rate_limited: status == 429,
+                is_rate_limited: status == 429 || status == 503,
             });
         }
 
-        let chunk_id = format!("chatcmpl-{}", Uuid::new_v4());
-        let model_name = target_model.to_string();
+        Ok(response)
+    }
 
-        let byte_stream = response.bytes_stream().eventsource();
-        let mapped_stream = byte_stream.filter_map(move |event_res| {
-            let cid = chunk_id.clone();
-            let mname = model_name.clone();
-            async move {
-                match event_res {
-                    Ok(event) => {
-                        let data = event.data.trim();
-                        if data.is_empty() || data == "[DONE]" {
-                            return None;
-                        }
-                        match AntigravityTranslator::parse_chunk(data, &mname, &cid) {
-                            Ok(Some(chunk)) => Some(Ok(chunk)),
-                            Ok(None) => None,
-                            Err(e) => Some(Err(e)),
-                        }
+    pub async fn execute_stream_with_failover(
+        &self,
+        request: &ChatRequest,
+        target_model: &str,
+        accounts: &[AntigravityAccount],
+    ) -> Result<(impl Stream<Item = Result<ChatChunk>>, String)> {
+        if accounts.is_empty() {
+            return Err(OxiError::Auth("No available Antigravity accounts".to_string()));
+        }
+
+        let mut last_error = None;
+
+        for (acc_idx, account) in accounts.iter().enumerate() {
+            for (ep_idx, &endpoint) in ENDPOINTS.iter().enumerate() {
+                tracing::debug!(
+                    "Attempting account #{}: {} on endpoint #{}: {}",
+                    acc_idx + 1,
+                    account.email,
+                    ep_idx + 1,
+                    endpoint
+                );
+
+                match self.try_execute_endpoint(endpoint, request, target_model, account).await {
+                    Ok(response) => {
+                        let chunk_id = format!("chatcmpl-{}", Uuid::new_v4());
+                        let model_name = target_model.to_string();
+                        let active_email = account.email.clone();
+
+                        let byte_stream = response.bytes_stream().eventsource();
+                        let mapped_stream = byte_stream.filter_map(move |event_res| {
+                            let cid = chunk_id.clone();
+                            let mname = model_name.clone();
+                            async move {
+                                match event_res {
+                                    Ok(event) => {
+                                        let data = event.data.trim();
+                                        if data.is_empty() || data == "[DONE]" {
+                                            return None;
+                                        }
+                                        match AntigravityTranslator::parse_chunk(data, &mname, &cid) {
+                                            Ok(Some(chunk)) => Some(Ok(chunk)),
+                                            Ok(None) => None,
+                                            Err(e) => Some(Err(e)),
+                                        }
+                                    }
+                                    Err(e) => Some(Err(OxiError::Network(format!("SSE event error: {}", e)))),
+                                }
+                            }
+                        });
+
+                        return Ok((mapped_stream, active_email));
                     }
-                    Err(e) => Some(Err(OxiError::Network(format!("SSE event error: {}", e)))),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failover trigger: Account {} on {} failed: {}. Trying next...",
+                            account.email,
+                            endpoint,
+                            e
+                        );
+                        last_error = Some(e);
+                    }
                 }
             }
-        });
+        }
 
-        Ok(mapped_stream)
+        Err(last_error.unwrap_or(OxiError::AllCombosFailed))
     }
 }

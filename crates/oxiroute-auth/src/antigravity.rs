@@ -1,10 +1,13 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use arc_swap::ArcSwap;
 use oxiroute_core::{OxiError, Result};
 use rusqlite::Connection;
 use crate::crypto::{decrypt_field, derive_key};
+
+pub const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 
 #[derive(Debug, Clone)]
 pub struct AntigravityAccount {
@@ -47,8 +50,9 @@ impl AntigravityAuthManager {
             }
         }
 
-        let secret = encryption_secret
-            .ok_or_else(|| OxiError::Auth("STORAGE_ENCRYPTION_KEY not found in .env".to_string()))?;
+        let secret = encryption_secret.ok_or_else(|| {
+            OxiError::Auth("STORAGE_ENCRYPTION_KEY not found in .env".to_string())
+        })?;
 
         let key = derive_key(&secret)?;
 
@@ -115,15 +119,92 @@ impl AntigravityAuthManager {
         Ok(Self::new(accounts))
     }
 
-    pub fn get_account(&self) -> Option<AntigravityAccount> {
-        if self.accounts.is_empty() {
-            return None;
+    pub fn get_accounts_ordered(&self) -> Vec<AntigravityAccount> {
+        let n = self.accounts.len();
+        if n == 0 {
+            return Vec::new();
         }
-        let idx = self.current_index.fetch_add(1, Ordering::Relaxed) % self.accounts.len();
-        Some(self.accounts[idx].clone())
+
+        let start_idx = self.current_index.fetch_add(1, Ordering::Relaxed) % n;
+        let mut ordered = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let idx = (start_idx + i) % n;
+            ordered.push(self.accounts[idx].clone());
+        }
+
+        ordered
     }
 
     pub fn list_accounts(&self) -> &[AntigravityAccount] {
         &self.accounts
+    }
+
+    pub async fn refresh_account_token(
+        account: &AntigravityAccount,
+        client: &reqwest::Client,
+    ) -> Result<String> {
+        let params = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &account.refresh_token),
+        ];
+
+        let res = client
+            .post(GOOGLE_OAUTH_TOKEN_URL)
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| OxiError::Auth(format!("Token refresh HTTP dispatch failed: {}", e)))?;
+
+        if !res.status().is_success() {
+            let status = res.status().as_u16();
+            let body = res.text().await.unwrap_or_default();
+            return Err(OxiError::Auth(format!(
+                "Token refresh rejected (status {}): {}",
+                status, body
+            )));
+        }
+
+        let json: serde_json::Value = res
+            .json()
+            .await
+            .map_err(|e| OxiError::Auth(format!("Token refresh JSON parse error: {}", e)))?;
+
+        let new_token = json
+            .get("access_token")
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| OxiError::Auth("Missing access_token in refresh response".to_string()))?;
+
+        account
+            .access_token
+            .store(Arc::new(new_token.to_string()));
+
+        tracing::info!(
+            "Successfully refreshed access token for Antigravity account: {}",
+            account.email
+        );
+
+        Ok(new_token.to_string())
+    }
+
+    pub fn spawn_background_refresher(self: Arc<Self>, proxy_url: Option<String>) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300)); // Every 5 minutes
+            let mut builder = reqwest::Client::builder();
+            if let Some(ref p) = proxy_url {
+                if let Ok(proxy) = reqwest::Proxy::all(p) {
+                    builder = builder.proxy(proxy);
+                }
+            }
+            let client = builder.build().unwrap_or_default();
+
+            loop {
+                interval.tick().await;
+                for account in self.list_accounts() {
+                    // Refresh token proactively
+                    let _ = Self::refresh_account_token(account, &client).await;
+                }
+            }
+        });
     }
 }

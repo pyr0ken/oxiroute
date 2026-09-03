@@ -12,7 +12,7 @@ use clap::Parser;
 use futures_util::StreamExt;
 use oxiroute_auth::AntigravityAuthManager;
 use oxiroute_core::ChatRequest;
-use oxiroute_engine::Engine;
+use oxiroute_engine::{Engine, PromptCompactor};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -94,8 +94,9 @@ async fn list_models() -> Json<serde_json::Value> {
 
 async fn chat_completions(
     State(state): State<AppState>,
-    Json(request): Json<ChatRequest>,
+    Json(raw_request): Json<ChatRequest>,
 ) -> Response {
+    let request = PromptCompactor::compact_request(raw_request);
     let model_name = request.model.clone();
     tracing::info!("Handling chat request for model: {}", model_name);
 
@@ -115,30 +116,31 @@ async fn chat_completions(
         }
     };
 
-    let account = match state.antigravity_auth.get_account() {
-        Some(a) => a,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({
-                    "error": {
-                        "message": "No active provider connection available",
-                        "type": "auth_error"
-                    }
-                })),
-            )
-                .into_response();
-        }
-    };
+    let candidate_accounts = state.antigravity_auth.get_accounts_ordered();
+    if candidate_accounts.is_empty() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": {
+                    "message": "No active provider connection available",
+                    "type": "auth_error"
+                }
+            })),
+        )
+            .into_response();
+    }
 
-    tracing::info!(
-        "Routing model '{}' to account: {}",
-        model_name,
-        account.email
-    );
+    match executor
+        .execute_stream_with_failover(&request, &model_name, &candidate_accounts)
+        .await
+    {
+        Ok((stream, active_account)) => {
+            tracing::info!(
+                "Successfully dispatched model '{}' via account: {}",
+                model_name,
+                active_account
+            );
 
-    match executor.execute_stream(&request, &model_name, &account).await {
-        Ok(stream) => {
             let sse_stream = stream.map(|res| match res {
                 Ok(chunk) => {
                     let json_str = serde_json::to_string(&chunk).unwrap_or_default();
@@ -166,7 +168,7 @@ async fn chat_completions(
                 .into_response()
         }
         Err(e) => {
-            tracing::error!("Execution error: {}", e);
+            tracing::error!("Execution error after all failovers: {}", e);
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
@@ -196,16 +198,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("Using configured egress proxy: {}", p);
     }
 
-    let auth_mgr = AntigravityAuthManager::load_from_omniroute_sqlite(
+    let auth_mgr = Arc::new(AntigravityAuthManager::load_from_omniroute_sqlite(
         &args.omniroute_db,
         &args.omniroute_env,
-    )?;
+    )?);
 
-    let engine = Engine::new(args.proxy.as_deref());
+    // Spawn proactive background token refresher
+    auth_mgr.clone().spawn_background_refresher(args.proxy.clone());
+
+    let engine = Arc::new(Engine::new(args.proxy.as_deref()));
 
     let state = AppState {
-        engine: Arc::new(engine),
-        antigravity_auth: Arc::new(auth_mgr),
+        engine,
+        antigravity_auth: auth_mgr,
     };
 
     let cors = CorsLayer::new()
