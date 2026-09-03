@@ -1,3 +1,5 @@
+pub mod tui;
+
 use axum::{
     extract::State,
     http::StatusCode,
@@ -17,8 +19,10 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tui::{AccountDisplay, TuiState};
 
 #[derive(Parser, Debug)]
 #[command(name = "oxiroute", about = "Fast, lightweight AI gateway & LLM router in pure Rust")]
@@ -34,12 +38,17 @@ struct Args {
 
     #[arg(long, env = "OXI_DATA_DIR")]
     data_dir: Option<PathBuf>,
+
+    /// Run with interactive terminal dashboard
+    #[arg(short, long)]
+    tui: bool,
 }
 
 #[derive(Clone)]
 struct AppState {
     engine: Arc<Engine>,
     antigravity_auth: Arc<AntigravityAuthManager>,
+    tui_state: Option<Arc<TuiState>>,
 }
 
 async fn health_check() -> &'static str {
@@ -94,9 +103,16 @@ async fn chat_completions(
     State(state): State<AppState>,
     Json(raw_request): Json<ChatRequest>,
 ) -> Response {
+    let start_time = Instant::now();
     let request = PromptCompactor::compact_request(raw_request);
     let model_name = request.model.clone();
-    tracing::info!("Handling chat request for model: {}", model_name);
+
+    if let Some(ref tui) = state.tui_state {
+        tui.record_request_start();
+        tui.add_log("INFO", format!("Inbound request for model: {}", model_name));
+    } else {
+        tracing::info!("Handling chat request for model: {}", model_name);
+    }
 
     let executor = match state.engine.antigravity() {
         Some(e) => e,
@@ -128,18 +144,24 @@ async fn chat_completions(
             .into_response();
     }
 
+    let tui_ref = state.tui_state.clone();
+
     match executor
         .execute_stream_with_failover(&request, &model_name, &candidate_accounts)
         .await
     {
         Ok((stream, active_account)) => {
-            tracing::info!(
-                "Successfully dispatched model '{}' via account: {}",
-                model_name,
-                active_account
-            );
+            if let Some(ref tui) = tui_ref {
+                tui.add_log("INFO", format!("Routed '{}' -> Account: {}", model_name, active_account));
+            } else {
+                tracing::info!(
+                    "Successfully dispatched model '{}' via account: {}",
+                    model_name,
+                    active_account
+                );
+            }
 
-            let sse_stream = stream.map(|res| match res {
+            let sse_stream = stream.map(move |res| match res {
                 Ok(chunk) => {
                     let json_str = serde_json::to_string(&chunk).unwrap_or_default();
                     Ok::<Event, Infallible>(Event::default().data(json_str))
@@ -155,7 +177,12 @@ async fn chat_completions(
                 }
             });
 
-            let done_stream = futures_util::stream::once(async {
+            let done_stream = futures_util::stream::once(async move {
+                let latency_ms = start_time.elapsed().as_millis() as u64;
+                if let Some(ref tui) = tui_ref {
+                    tui.record_request_end(50, latency_ms);
+                    tui.add_log("INFO", format!("Stream completed in {}ms", latency_ms));
+                }
                 Ok::<Event, Infallible>(Event::default().data("[DONE]"))
             });
 
@@ -166,7 +193,11 @@ async fn chat_completions(
                 .into_response()
         }
         Err(e) => {
-            tracing::error!("Execution error after all failovers: {}", e);
+            if let Some(ref tui) = tui_ref {
+                tui.add_log("ERROR", format!("Execution failed: {}", e));
+            } else {
+                tracing::error!("Execution error after all failovers: {}", e);
+            }
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
@@ -183,37 +214,53 @@ async fn chat_completions(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
     let args = Args::parse();
+
+    if !args.tui {
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
+
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
 
     let data_dir = args.data_dir.unwrap_or_else(default_oxiroute_dir);
-    tracing::info!("Oxiroute native data directory: {:?}", data_dir);
 
     let storage = StorageManager::new(data_dir);
     storage.init()?;
-
-    if let Some(ref p) = args.proxy {
-        tracing::info!("Using configured egress proxy: {}", p);
-    }
 
     let auth_mgr = Arc::new(AntigravityAuthManager::load_from_omniroute_sqlite(
         &storage.db_path,
         &storage.env_path,
     )?);
 
-    // Spawn proactive background token refresher
     auth_mgr.clone().spawn_background_refresher(args.proxy.clone());
 
     let engine = Arc::new(Engine::new(args.proxy.as_deref()));
 
-    let state = AppState {
+    let tui_state = if args.tui {
+        let state = Arc::new(TuiState::new(args.port, args.proxy.clone()));
+        let acc_displays = auth_mgr
+            .list_accounts()
+            .iter()
+            .map(|a| AccountDisplay {
+                provider: "antigravity".to_string(),
+                email: a.email.clone(),
+                priority: a.priority,
+                is_active: a.is_active,
+            })
+            .collect();
+        state.set_accounts(acc_displays);
+        Some(state)
+    } else {
+        None
+    };
+
+    let app_state = AppState {
         engine,
         antigravity_auth: auth_mgr,
+        tui_state: tui_state.clone(),
     };
 
     let cors = CorsLayer::new()
@@ -226,12 +273,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
         .layer(cors)
-        .with_state(state);
-
-    tracing::info!("🦀 Oxiroute listening on http://{}", addr);
+        .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+
+    if args.tui {
+        // Run Axum server in background task
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        // Run interactive TUI in foreground thread
+        if let Some(state) = tui_state {
+            tui::run_tui(state)?;
+        }
+    } else {
+        tracing::info!("🦀 Oxiroute listening on http://{}", addr);
+        if let Some(ref p) = args.proxy {
+            tracing::info!("Using configured egress proxy: {}", p);
+        }
+        axum::serve(listener, app).await?;
+    }
 
     Ok(())
 }
