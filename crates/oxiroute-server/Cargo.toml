@@ -13,6 +13,7 @@ oxiroute-core = { workspace = true }
 oxiroute-translator = { workspace = true }
 oxiroute-engine = { workspace = true }
 oxiroute-auth = { workspace = true }
+reqwest = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }

@@ -302,7 +302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app_state = AppState {
         engine,
-        antigravity_auth: auth_mgr,
+        antigravity_auth: auth_mgr.clone(),
         tui_state: tui_state.clone(),
     };
 
@@ -328,7 +328,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Run interactive TUI in foreground thread
         if let Some(state) = tui_state {
-            tui::run_tui(state)?;
+            tui::run_tui(state, auth_mgr.clone())?;
         }
     } else {
         tracing::info!("🦀 Oxiroute listening on http://{}", addr);

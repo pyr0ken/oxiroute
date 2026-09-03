@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use oxiroute_core::{OxiError, Result};
 use rusqlite::Connection;
@@ -138,6 +138,47 @@ impl AntigravityAuthManager {
 
     pub fn list_accounts(&self) -> &[AntigravityAccount] {
         &self.accounts
+    }
+
+    pub async fn test_account_connection(
+        account: &AntigravityAccount,
+        proxy_url: Option<&str>,
+    ) -> std::result::Result<u64, String> {
+        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(8));
+        if let Some(p) = proxy_url {
+            if let Ok(proxy) = reqwest::Proxy::all(p) {
+                builder = builder.proxy(proxy);
+            }
+        }
+        let client = builder.build().map_err(|e| format!("Client build error: {}", e))?;
+
+        let start = Instant::now();
+        // Probe Google OAuth endpoint with refresh token
+        let params = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &account.refresh_token),
+        ];
+
+        let res = client
+            .post(GOOGLE_OAUTH_TOKEN_URL)
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| format!("Network probe failed (proxy/route error): {}", e))?;
+
+        let latency_ms = start.elapsed().as_millis() as u64;
+
+        if res.status().is_success() {
+            if let Ok(json) = res.json::<serde_json::Value>().await {
+                if let Some(tok) = json.get("access_token").and_then(|t| t.as_str()) {
+                    account.access_token.store(Arc::new(tok.to_string()));
+                }
+            }
+            Ok(latency_ms)
+        } else {
+            let status = res.status().as_u16();
+            Err(format!("HTTP status {}", status))
+        }
     }
 
     pub async fn refresh_account_token(

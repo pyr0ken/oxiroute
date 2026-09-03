@@ -16,7 +16,10 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub fn run_tui(state: Arc<TuiState>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_tui(
+    state: Arc<TuiState>,
+    auth_mgr: Arc<oxiroute_auth::AntigravityAuthManager>,
+) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -165,17 +168,64 @@ pub fn run_tui(state: Arc<TuiState>) -> Result<(), Box<dyn std::error::Error>> {
                             let tab = *state.active_tab.read().unwrap();
                             if tab == ActiveTab::Providers {
                                 let sel_idx = *state.selected_index.read().unwrap();
-                                let mut accounts_guard = state.accounts.write().unwrap();
-                                if let Some(acc) = accounts_guard.get_mut(sel_idx) {
-                                    let ping = 105 + (rand_simple() % 45);
-                                    acc.status_text = format!("Verified ● ({}ms)", ping);
-                                    state.add_log(
-                                        "INFO",
-                                        format!(
-                                            "Tested connection '{}' ({}) -> 200 OK ({}ms latency)",
-                                            acc.name, acc.email, ping
-                                        ),
-                                    );
+                                let target_email = {
+                                    let mut accounts_guard = state.accounts.write().unwrap();
+                                    if let Some(acc) = accounts_guard.get_mut(sel_idx) {
+                                        acc.status_text = "Testing... ⏳".to_string();
+                                        Some(acc.email.clone())
+                                    } else {
+                                        None
+                                    }
+                                };
+
+                                if let Some(email) = target_email {
+                                    let state_clone = state.clone();
+                                    let auth_clone = auth_mgr.clone();
+                                    tokio::spawn(async move {
+                                        let acc_opt = auth_clone
+                                            .list_accounts()
+                                            .iter()
+                                            .find(|a| a.email == email)
+                                            .cloned();
+                                        if let Some(acc) = acc_opt {
+                                            state_clone.add_log(
+                                                "INFO",
+                                                format!("Dispatching live network probe for account: {}", email),
+                                            );
+                                            match oxiroute_auth::AntigravityAuthManager::test_account_connection(
+                                                &acc,
+                                                state_clone.proxy.as_deref(),
+                                            )
+                                            .await
+                                            {
+                                                Ok(latency) => {
+                                                    if let Ok(mut accounts_guard) = state_clone.accounts.write() {
+                                                        if let Some(a) = accounts_guard.iter_mut().find(|a| a.email == email) {
+                                                            a.status_text = format!("Verified ● ({}ms)", latency);
+                                                        }
+                                                    }
+                                                    state_clone.add_log(
+                                                        "INFO",
+                                                        format!(
+                                                            "Real probe success: '{}' -> 200 OK ({}ms latency)",
+                                                            email, latency
+                                                        ),
+                                                    );
+                                                }
+                                                Err(err) => {
+                                                    if let Ok(mut accounts_guard) = state_clone.accounts.write() {
+                                                        if let Some(a) = accounts_guard.iter_mut().find(|a| a.email == email) {
+                                                            a.status_text = "Failed ✕".to_string();
+                                                        }
+                                                    }
+                                                    state_clone.add_log(
+                                                        "ERROR",
+                                                        format!("Real probe failed for '{}': {}", email, err),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    });
                                 }
                             }
                         }
@@ -183,16 +233,71 @@ pub fn run_tui(state: Arc<TuiState>) -> Result<(), Box<dyn std::error::Error>> {
                             let tab = *state.active_tab.read().unwrap();
                             if tab == ActiveTab::Providers {
                                 let sel_idx = *state.selected_index.read().unwrap();
-                                let mut accounts_guard = state.accounts.write().unwrap();
-                                if let Some(acc) = accounts_guard.get_mut(sel_idx) {
-                                    acc.status_text = "Refreshed ✓".to_string();
-                                    state.add_log(
-                                        "INFO",
-                                        format!(
-                                            "Refreshed OAuth session for '{}' ({}) (Valid 3600s)",
-                                            acc.name, acc.email
-                                        ),
-                                    );
+                                let target_email = {
+                                    let mut accounts_guard = state.accounts.write().unwrap();
+                                    if let Some(acc) = accounts_guard.get_mut(sel_idx) {
+                                        acc.status_text = "Refreshing... ⏳".to_string();
+                                        Some(acc.email.clone())
+                                    } else {
+                                        None
+                                    }
+                                };
+
+                                if let Some(email) = target_email {
+                                    let state_clone = state.clone();
+                                    let auth_clone = auth_mgr.clone();
+                                    tokio::spawn(async move {
+                                        let acc_opt = auth_clone
+                                            .list_accounts()
+                                            .iter()
+                                            .find(|a| a.email == email)
+                                            .cloned();
+                                        if let Some(acc) = acc_opt {
+                                            let mut builder = reqwest::Client::builder();
+                                            if let Some(ref p) = state_clone.proxy {
+                                                if let Ok(proxy) = reqwest::Proxy::all(p) {
+                                                    builder = builder.proxy(proxy);
+                                                }
+                                            }
+                                            let client = builder.build().unwrap_or_default();
+                                            state_clone.add_log(
+                                                "INFO",
+                                                format!("Dispatching live OAuth refresh for: {}", email),
+                                            );
+                                            match oxiroute_auth::AntigravityAuthManager::refresh_account_token(
+                                                &acc,
+                                                &client,
+                                            )
+                                            .await
+                                            {
+                                                Ok(_) => {
+                                                    if let Ok(mut accounts_guard) = state_clone.accounts.write() {
+                                                        if let Some(a) = accounts_guard.iter_mut().find(|a| a.email == email) {
+                                                            a.status_text = "Refreshed ✓".to_string();
+                                                        }
+                                                    }
+                                                    state_clone.add_log(
+                                                        "INFO",
+                                                        format!(
+                                                            "Real OAuth refresh successful for '{}' (Valid 3600s)",
+                                                            email
+                                                        ),
+                                                    );
+                                                }
+                                                Err(err) => {
+                                                    if let Ok(mut accounts_guard) = state_clone.accounts.write() {
+                                                        if let Some(a) = accounts_guard.iter_mut().find(|a| a.email == email) {
+                                                            a.status_text = "Refresh Fail ✕".to_string();
+                                                        }
+                                                    }
+                                                    state_clone.add_log(
+                                                        "ERROR",
+                                                        format!("Real OAuth refresh failed for '{}': {}", email, err),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    });
                                 }
                             }
                         }
@@ -1016,10 +1121,4 @@ fn handle_proxy_step(
     }
 }
 
-fn rand_simple() -> u64 {
-    use std::time::SystemTime;
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .subsec_millis() as u64
-}
+
