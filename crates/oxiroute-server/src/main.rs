@@ -10,11 +10,12 @@ use axum::{
 };
 use clap::Parser;
 use futures_util::StreamExt;
-use oxiroute_auth::AntigravityAuthManager;
+use oxiroute_auth::{default_oxiroute_dir, AntigravityAuthManager, StorageManager};
 use oxiroute_core::ChatRequest;
 use oxiroute_engine::{Engine, PromptCompactor};
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -31,11 +32,8 @@ struct Args {
     #[arg(long, env = "OXI_PROXY")]
     proxy: Option<String>,
 
-    #[arg(long, env = "OXI_DB_PATH", default_value = "/home/omid/.omniroute/storage.sqlite")]
-    omniroute_db: String,
-
-    #[arg(long, env = "OXI_ENV_PATH", default_value = "/home/omid/.omniroute/.env")]
-    omniroute_env: String,
+    #[arg(long, env = "OXI_DATA_DIR")]
+    data_dir: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -193,14 +191,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
 
-    tracing::info!("Initializing Oxiroute on port {}...", args.port);
+    let data_dir = args.data_dir.unwrap_or_else(default_oxiroute_dir);
+    tracing::info!("Oxiroute native data directory: {:?}", data_dir);
+
+    let storage = StorageManager::new(data_dir);
+    storage.init()?;
+
     if let Some(ref p) = args.proxy {
         tracing::info!("Using configured egress proxy: {}", p);
     }
 
     let auth_mgr = Arc::new(AntigravityAuthManager::load_from_omniroute_sqlite(
-        &args.omniroute_db,
-        &args.omniroute_env,
+        &storage.db_path,
+        &storage.env_path,
     )?);
 
     // Spawn proactive background token refresher

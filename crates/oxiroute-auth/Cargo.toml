@@ -19,3 +19,5 @@ aes-gcm = { workspace = true }
 scrypt = { workspace = true }
 hex = { workspace = true }
 rusqlite = { workspace = true }
+dirs = { workspace = true }
+uuid = { workspace = true }

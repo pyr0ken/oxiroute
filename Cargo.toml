@@ -38,6 +38,7 @@ aes-gcm = "0.10"
 scrypt = "0.11"
 hex = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
+dirs = "5.0"
 
 # Internal workspace crates
 oxiroute-core = { path = "crates/oxiroute-core" }
