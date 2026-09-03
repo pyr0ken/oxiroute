@@ -24,6 +24,40 @@ pub const COMBO_STRATEGIES: &[(&str, &str)] = &[
     ("pipeline", "Sequential multi-model processing pipeline"),
 ];
 
+pub const KNOWN_MODELS: &[&str] = &[
+    "antigravity/claude-sonnet-4-6",
+    "antigravity/claude-opus-4-6-thinking",
+    "antigravity/gemini-3.7-flash-low",
+    "antigravity/gemini-3.7-flash-tiered",
+    "antigravity/gemini-2.5-flash",
+    "antigravity/gemini-3.6-flash-high",
+    "antigravity/gemini-pro-agent",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6-thinking",
+    "gemini-3.7-flash-low",
+    "gemini-2.5-flash",
+    "deepseek/deepseek-r1",
+    "deepseek/deepseek-v3",
+    "openrouter/auto",
+    "openai/gpt-4o",
+    "openai/o3-mini",
+    "groq/llama-3.3-70b-versatile",
+];
+
+pub fn find_model_suggestion(input: &str) -> Option<&'static str> {
+    let last_token = input.split(',').last()?.trim();
+    if last_token.is_empty() {
+        return None;
+    }
+    let token_lower = last_token.to_lowercase();
+    for &model in KNOWN_MODELS {
+        if model.to_lowercase().starts_with(&token_lower) && model.len() > last_token.len() {
+            return Some(&model[last_token.len()..]);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTab {
     Overview = 0,
@@ -63,7 +97,22 @@ pub enum ModalState {
         models_input: String,
         active_field: usize,
     },
+    EditCombo {
+        combo_id: String,
+        name: String,
+        strategy_idx: usize,
+        models_input: String,
+        active_field: usize,
+    },
     AddProxy {
+        name: String,
+        protocol_idx: usize,
+        host: String,
+        port: String,
+        active_field: usize,
+    },
+    EditProxy {
+        proxy_id: String,
         name: String,
         protocol_idx: usize,
         host: String,
