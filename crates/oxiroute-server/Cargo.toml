@@ -26,3 +26,4 @@ futures-util = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }

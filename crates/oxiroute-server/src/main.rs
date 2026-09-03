@@ -145,12 +145,14 @@ async fn chat_completions(
     }
 
     let tui_ref = state.tui_state.clone();
+    let model_for_done = model_name.clone();
 
     match executor
         .execute_stream_with_failover(&request, &model_name, &candidate_accounts)
         .await
     {
         Ok((stream, active_account)) => {
+            let acc_for_done = active_account.clone();
             if let Some(ref tui) = tui_ref {
                 tui.add_log("INFO", format!("Routed '{}' -> Account: {}", model_name, active_account));
             } else {
@@ -180,7 +182,7 @@ async fn chat_completions(
             let done_stream = futures_util::stream::once(async move {
                 let latency_ms = start_time.elapsed().as_millis() as u64;
                 if let Some(ref tui) = tui_ref {
-                    tui.record_request_end(50, latency_ms);
+                    tui.record_request_end(&model_for_done, &acc_for_done, 50, latency_ms, 200);
                     tui.add_log("INFO", format!("Stream completed in {}ms", latency_ms));
                 }
                 Ok::<Event, Infallible>(Event::default().data("[DONE]"))
@@ -193,7 +195,9 @@ async fn chat_completions(
                 .into_response()
         }
         Err(e) => {
+            let latency_ms = start_time.elapsed().as_millis() as u64;
             if let Some(ref tui) = tui_ref {
+                tui.record_request_end(&model_name, "failed", 0, latency_ms, 502);
                 tui.add_log("ERROR", format!("Execution failed: {}", e));
             } else {
                 tracing::error!("Execution error after all failovers: {}", e);
