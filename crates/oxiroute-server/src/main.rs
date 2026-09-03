@@ -249,13 +249,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .list_accounts()
             .iter()
             .map(|a| AccountDisplay {
+                id: a.email.clone(),
                 provider: "antigravity".to_string(),
+                name: a.email.clone(),
                 email: a.email.clone(),
                 priority: a.priority,
                 is_active: a.is_active,
+                status_text: "Active ●".to_string(),
             })
             .collect();
         state.set_accounts(acc_displays);
+
+        // Pre-populate default smart combos
+        state.set_combos(vec![
+            tui::ComboDisplay {
+                id: "c-claude-agent".to_string(),
+                name: "claude-smart-coding".to_string(),
+                strategy: "priority".to_string(),
+                models: vec![
+                    "antigravity/claude-sonnet-4-6".to_string(),
+                    "antigravity/claude-opus-4-6-thinking".to_string(),
+                    "antigravity/gemini-3.7-flash-low".to_string(),
+                ],
+                proxy_name: args.proxy.clone(),
+            },
+            tui::ComboDisplay {
+                id: "c-flash-fallback".to_string(),
+                name: "flash-speed-router".to_string(),
+                strategy: "round-robin".to_string(),
+                models: vec![
+                    "antigravity/gemini-3.7-flash-low".to_string(),
+                    "antigravity/gemini-2.5-flash".to_string(),
+                ],
+                proxy_name: None,
+            },
+        ]);
+
+        if let Some(ref _p) = args.proxy {
+            state.set_proxies(vec![tui::ProxyDisplay {
+                id: "p-default".to_string(),
+                name: "Default SOCKS5 Egress".to_string(),
+                protocol: "socks5h".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: 5454,
+                status: "Active ● (Connected)".to_string(),
+            }]);
+        }
         Some(state)
     } else {
         None

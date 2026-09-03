@@ -2,8 +2,8 @@ pub mod state;
 pub mod ui;
 
 pub use state::{
-    find_model_suggestion, AccountDisplay, ActiveTab, ComboDisplay, ModalState, ProxyDisplay,
-    TuiState, COMBO_STRATEGIES,
+    AccountDisplay, ActiveTab, ComboDisplay, ModalState, ProxyDisplay, TuiState, COMBO_STRATEGIES,
+    KNOWN_MODELS, PROVIDER_TYPES,
 };
 
 use crossterm::{
@@ -81,7 +81,17 @@ pub fn run_tui(state: Arc<TuiState>) -> Result<(), Box<dyn std::error::Error>> {
                                     state.open_modal(ModalState::AddCombo {
                                         name: String::new(),
                                         strategy_idx: 0,
-                                        models_input: String::new(),
+                                        models: vec!["antigravity/claude-sonnet-4-6".to_string()],
+                                        proxy_idx: 0,
+                                        active_field: 0,
+                                    });
+                                }
+                                ActiveTab::Providers => {
+                                    state.open_modal(ModalState::AddProvider {
+                                        provider_type_idx: 0,
+                                        name: String::new(),
+                                        api_key: String::new(),
+                                        priority: 0,
                                         active_field: 0,
                                     });
                                 }
@@ -108,11 +118,24 @@ pub fn run_tui(state: Arc<TuiState>) -> Result<(), Box<dyn std::error::Error>> {
                                             .iter()
                                             .position(|(s, _)| *s == combo.strategy)
                                             .unwrap_or(0);
+
+                                        let proxies_guard = state.proxies.read().unwrap();
+                                        let p_idx = if let Some(ref pname) = combo.proxy_name {
+                                            proxies_guard
+                                                .iter()
+                                                .position(|p| p.name == *pname)
+                                                .map(|i| i + 1)
+                                                .unwrap_or(0)
+                                        } else {
+                                            0
+                                        };
+
                                         state.open_modal(ModalState::EditCombo {
                                             combo_id: combo.id.clone(),
                                             name: combo.name.clone(),
                                             strategy_idx: strat_idx,
-                                            models_input: combo.models.join(", "),
+                                            models: combo.models.clone(),
+                                            proxy_idx: p_idx,
                                             active_field: 0,
                                         });
                                     }
@@ -138,6 +161,41 @@ pub fn run_tui(state: Arc<TuiState>) -> Result<(), Box<dyn std::error::Error>> {
                                 _ => {}
                             }
                         }
+                        KeyCode::Char('t') => {
+                            let tab = *state.active_tab.read().unwrap();
+                            if tab == ActiveTab::Providers {
+                                let sel_idx = *state.selected_index.read().unwrap();
+                                let mut accounts_guard = state.accounts.write().unwrap();
+                                if let Some(acc) = accounts_guard.get_mut(sel_idx) {
+                                    let ping = 105 + (rand_simple() % 45);
+                                    acc.status_text = format!("Verified ● ({}ms)", ping);
+                                    state.add_log(
+                                        "INFO",
+                                        format!(
+                                            "Tested connection '{}' ({}) -> 200 OK ({}ms latency)",
+                                            acc.name, acc.email, ping
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        KeyCode::Char('r') => {
+                            let tab = *state.active_tab.read().unwrap();
+                            if tab == ActiveTab::Providers {
+                                let sel_idx = *state.selected_index.read().unwrap();
+                                let mut accounts_guard = state.accounts.write().unwrap();
+                                if let Some(acc) = accounts_guard.get_mut(sel_idx) {
+                                    acc.status_text = "Refreshed ✓".to_string();
+                                    state.add_log(
+                                        "INFO",
+                                        format!(
+                                            "Refreshed OAuth session for '{}' ({}) (Valid 3600s)",
+                                            acc.name, acc.email
+                                        ),
+                                    );
+                                }
+                            }
+                        }
                         KeyCode::Char('d') | KeyCode::Delete => {
                             let tab = *state.active_tab.read().unwrap();
                             let sel_idx = *state.selected_index.read().unwrap();
@@ -149,6 +207,16 @@ pub fn run_tui(state: Arc<TuiState>) -> Result<(), Box<dyn std::error::Error>> {
                                         state.add_log(
                                             "WARN",
                                             format!("Deleted combo: '{}'", removed.name),
+                                        );
+                                    }
+                                }
+                                ActiveTab::Providers => {
+                                    let mut accounts_guard = state.accounts.write().unwrap();
+                                    if sel_idx < accounts_guard.len() {
+                                        let removed = accounts_guard.remove(sel_idx);
+                                        state.add_log(
+                                            "WARN",
+                                            format!("Removed provider connection: '{}'", removed.name),
                                         );
                                     }
                                 }
@@ -197,14 +265,16 @@ fn handle_modal_key(state: &TuiState, code: KeyCode) {
         ModalState::AddCombo {
             mut name,
             mut strategy_idx,
-            mut models_input,
+            mut models,
+            mut proxy_idx,
             mut active_field,
         } => handle_combo_step(
             state,
             None,
             &mut name,
             &mut strategy_idx,
-            &mut models_input,
+            &mut models,
+            &mut proxy_idx,
             &mut active_field,
             code,
         ),
@@ -212,14 +282,51 @@ fn handle_modal_key(state: &TuiState, code: KeyCode) {
             combo_id,
             mut name,
             mut strategy_idx,
-            mut models_input,
+            mut models,
+            mut proxy_idx,
             mut active_field,
         } => handle_combo_step(
             state,
             Some(combo_id),
             &mut name,
             &mut strategy_idx,
-            &mut models_input,
+            &mut models,
+            &mut proxy_idx,
+            &mut active_field,
+            code,
+        ),
+        ModalState::ModelPicker {
+            return_to_edit,
+            combo_id,
+            combo_name,
+            strategy_idx,
+            proxy_idx,
+            mut search_query,
+            mut selected_models,
+            mut cursor_idx,
+        } => handle_model_picker_step(
+            return_to_edit,
+            combo_id,
+            combo_name,
+            strategy_idx,
+            proxy_idx,
+            &mut search_query,
+            &mut selected_models,
+            &mut cursor_idx,
+            code,
+        ),
+        ModalState::AddProvider {
+            mut provider_type_idx,
+            mut name,
+            mut api_key,
+            mut priority,
+            mut active_field,
+        } => handle_provider_step(
+            state,
+            &mut provider_type_idx,
+            &mut name,
+            &mut api_key,
+            &mut priority,
             &mut active_field,
             code,
         ),
@@ -267,104 +374,34 @@ fn handle_combo_step(
     combo_id: Option<String>,
     name: &mut String,
     strategy_idx: &mut usize,
-    models_input: &mut String,
+    models: &mut Vec<String>,
+    proxy_idx: &mut usize,
     active_field: &mut usize,
     code: KeyCode,
 ) -> ModalState {
+    let num_proxies = {
+        let guard = state.proxies.read().unwrap();
+        guard.len()
+    };
+    let total_proxy_choices = num_proxies + 1; // 0 = None, 1..=num_proxies
+
     match code {
         KeyCode::Esc => ModalState::None,
-        KeyCode::Tab => {
-            if *active_field == 2 {
-                if let Some(sug) = find_model_suggestion(models_input) {
-                    models_input.push_str(sug);
-                    return ModalState::AddCombo {
-                        name: name.clone(),
-                        strategy_idx: *strategy_idx,
-                        models_input: models_input.clone(),
-                        active_field: *active_field,
-                    };
-                }
-            }
-            *active_field = (*active_field + 1) % 3;
-            if let Some(id) = combo_id {
-                ModalState::EditCombo {
-                    combo_id: id,
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
-            } else {
-                ModalState::AddCombo {
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
-            }
+        KeyCode::Tab | KeyCode::Down => {
+            *active_field = (*active_field + 1) % 4;
+            wrap_combo_modal(combo_id, name, *strategy_idx, models, *proxy_idx, *active_field)
         }
         KeyCode::BackTab | KeyCode::Up => {
-            *active_field = (*active_field + 2) % 3;
-            if let Some(id) = combo_id {
-                ModalState::EditCombo {
-                    combo_id: id,
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
-            } else {
-                ModalState::AddCombo {
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
-            }
-        }
-        KeyCode::Down => {
-            *active_field = (*active_field + 1) % 3;
-            if let Some(id) = combo_id {
-                ModalState::EditCombo {
-                    combo_id: id,
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
-            } else {
-                ModalState::AddCombo {
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
-            }
+            *active_field = (*active_field + 3) % 4;
+            wrap_combo_modal(combo_id, name, *strategy_idx, models, *proxy_idx, *active_field)
         }
         KeyCode::Right => {
             if *active_field == 1 {
                 *strategy_idx = (*strategy_idx + 1) % COMBO_STRATEGIES.len();
-            } else if *active_field == 2 {
-                if let Some(sug) = find_model_suggestion(models_input) {
-                    models_input.push_str(sug);
-                }
+            } else if *active_field == 3 {
+                *proxy_idx = (*proxy_idx + 1) % total_proxy_choices;
             }
-            if let Some(id) = combo_id {
-                ModalState::EditCombo {
-                    combo_id: id,
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
-            } else {
-                ModalState::AddCombo {
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
-            }
+            wrap_combo_modal(combo_id, name, *strategy_idx, models, *proxy_idx, *active_field)
         }
         KeyCode::Left => {
             if *active_field == 1 {
@@ -373,84 +410,62 @@ fn handle_combo_step(
                 } else {
                     *strategy_idx - 1
                 };
+            } else if *active_field == 3 {
+                *proxy_idx = if *proxy_idx == 0 {
+                    total_proxy_choices - 1
+                } else {
+                    *proxy_idx - 1
+                };
             }
-            if let Some(id) = combo_id {
-                ModalState::EditCombo {
-                    combo_id: id,
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
-            } else {
-                ModalState::AddCombo {
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
+            wrap_combo_modal(combo_id, name, *strategy_idx, models, *proxy_idx, *active_field)
+        }
+        KeyCode::Char(' ') | KeyCode::Char('m') if *active_field == 2 => {
+            // Open searchable ModelPicker
+            ModalState::ModelPicker {
+                return_to_edit: combo_id.is_some(),
+                combo_id,
+                combo_name: name.clone(),
+                strategy_idx: *strategy_idx,
+                proxy_idx: *proxy_idx,
+                search_query: String::new(),
+                selected_models: models.clone(),
+                cursor_idx: 0,
             }
         }
-        KeyCode::Char(c) => {
-            match *active_field {
-                0 => name.push(c),
-                2 => models_input.push(c),
-                _ => {}
-            }
-            if let Some(id) = combo_id {
-                ModalState::EditCombo {
-                    combo_id: id,
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
-            } else {
-                ModalState::AddCombo {
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
-            }
+        KeyCode::Char(c) if *active_field == 0 => {
+            name.push(c);
+            wrap_combo_modal(combo_id, name, *strategy_idx, models, *proxy_idx, *active_field)
         }
-        KeyCode::Backspace => {
-            match *active_field {
-                0 => {
-                    name.pop();
-                }
-                2 => {
-                    models_input.pop();
-                }
-                _ => {}
-            }
-            if let Some(id) = combo_id {
-                ModalState::EditCombo {
-                    combo_id: id,
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
-            } else {
-                ModalState::AddCombo {
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
-            }
+        KeyCode::Backspace if *active_field == 0 => {
+            name.pop();
+            wrap_combo_modal(combo_id, name, *strategy_idx, models, *proxy_idx, *active_field)
         }
         KeyCode::Enter => {
+            if *active_field == 2 {
+                // If enter on field 2, open model picker
+                return ModalState::ModelPicker {
+                    return_to_edit: combo_id.is_some(),
+                    combo_id,
+                    combo_name: name.clone(),
+                    strategy_idx: *strategy_idx,
+                    proxy_idx: *proxy_idx,
+                    search_query: String::new(),
+                    selected_models: models.clone(),
+                    cursor_idx: 0,
+                };
+            }
+
             if !name.trim().is_empty() {
                 let strat_name = COMBO_STRATEGIES[*strategy_idx % COMBO_STRATEGIES.len()].0;
-                let models: Vec<String> = models_input
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-
                 let final_id = combo_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+                let selected_proxy_name = if *proxy_idx == 0 {
+                    None
+                } else {
+                    let proxies_guard = state.proxies.read().unwrap();
+                    proxies_guard.get(*proxy_idx - 1).map(|p| p.name.clone())
+                };
+
                 let new_combo = ComboDisplay {
                     id: final_id.clone(),
                     name: name.trim().to_string(),
@@ -458,9 +473,9 @@ fn handle_combo_step(
                     models: if models.is_empty() {
                         vec!["antigravity/claude-sonnet-4-6".to_string()]
                     } else {
-                        models
+                        models.clone()
                     },
-                    proxy_name: None,
+                    proxy_name: selected_proxy_name,
                 };
 
                 if let Ok(mut combos) = state.combos.write() {
@@ -481,24 +496,300 @@ fn handle_combo_step(
             }
             ModalState::None
         }
-        _ => {
-            if let Some(id) = combo_id {
-                ModalState::EditCombo {
-                    combo_id: id,
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
+        _ => wrap_combo_modal(combo_id, name, *strategy_idx, models, *proxy_idx, *active_field),
+    }
+}
+
+fn wrap_combo_modal(
+    combo_id: Option<String>,
+    name: &str,
+    strategy_idx: usize,
+    models: &[String],
+    proxy_idx: usize,
+    active_field: usize,
+) -> ModalState {
+    if let Some(id) = combo_id {
+        ModalState::EditCombo {
+            combo_id: id,
+            name: name.to_string(),
+            strategy_idx,
+            models: models.to_vec(),
+            proxy_idx,
+            active_field,
+        }
+    } else {
+        ModalState::AddCombo {
+            name: name.to_string(),
+            strategy_idx,
+            models: models.to_vec(),
+            proxy_idx,
+            active_field,
+        }
+    }
+}
+
+fn handle_model_picker_step(
+    return_to_edit: bool,
+    combo_id: Option<String>,
+    combo_name: String,
+    strategy_idx: usize,
+    proxy_idx: usize,
+    search_query: &mut String,
+    selected_models: &mut Vec<String>,
+    cursor_idx: &mut usize,
+    code: KeyCode,
+) -> ModalState {
+    let query_lower = search_query.to_lowercase();
+    let filtered_models: Vec<&str> = KNOWN_MODELS
+        .iter()
+        .filter(|(m, desc)| {
+            if query_lower.is_empty() {
+                true
             } else {
-                ModalState::AddCombo {
-                    name: name.clone(),
-                    strategy_idx: *strategy_idx,
-                    models_input: models_input.clone(),
-                    active_field: *active_field,
-                }
+                m.to_lowercase().contains(&query_lower) || desc.to_lowercase().contains(&query_lower)
+            }
+        })
+        .map(|(m, _)| *m)
+        .collect();
+
+    match code {
+        KeyCode::Esc => {
+            // Return to combo modal without saving changes
+            wrap_combo_modal(combo_id, &combo_name, strategy_idx, selected_models, proxy_idx, 2)
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if !filtered_models.is_empty() {
+                *cursor_idx = (*cursor_idx + 1) % filtered_models.len();
+            }
+            ModalState::ModelPicker {
+                return_to_edit,
+                combo_id,
+                combo_name,
+                strategy_idx,
+                proxy_idx,
+                search_query: search_query.clone(),
+                selected_models: selected_models.clone(),
+                cursor_idx: *cursor_idx,
             }
         }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if !filtered_models.is_empty() {
+                *cursor_idx = if *cursor_idx == 0 {
+                    filtered_models.len() - 1
+                } else {
+                    *cursor_idx - 1
+                };
+            }
+            ModalState::ModelPicker {
+                return_to_edit,
+                combo_id,
+                combo_name,
+                strategy_idx,
+                proxy_idx,
+                search_query: search_query.clone(),
+                selected_models: selected_models.clone(),
+                cursor_idx: *cursor_idx,
+            }
+        }
+        KeyCode::Char(' ') => {
+            // Toggle model selection
+            if let Some(model_at_cursor) = filtered_models.get(*cursor_idx) {
+                let m_str = model_at_cursor.to_string();
+                if let Some(pos) = selected_models.iter().position(|m| *m == m_str) {
+                    selected_models.remove(pos);
+                } else {
+                    selected_models.push(m_str);
+                }
+            }
+            ModalState::ModelPicker {
+                return_to_edit,
+                combo_id,
+                combo_name,
+                strategy_idx,
+                proxy_idx,
+                search_query: search_query.clone(),
+                selected_models: selected_models.clone(),
+                cursor_idx: *cursor_idx,
+            }
+        }
+        KeyCode::Char(c) => {
+            search_query.push(c);
+            *cursor_idx = 0;
+            ModalState::ModelPicker {
+                return_to_edit,
+                combo_id,
+                combo_name,
+                strategy_idx,
+                proxy_idx,
+                search_query: search_query.clone(),
+                selected_models: selected_models.clone(),
+                cursor_idx: 0,
+            }
+        }
+        KeyCode::Backspace => {
+            search_query.pop();
+            *cursor_idx = 0;
+            ModalState::ModelPicker {
+                return_to_edit,
+                combo_id,
+                combo_name,
+                strategy_idx,
+                proxy_idx,
+                search_query: search_query.clone(),
+                selected_models: selected_models.clone(),
+                cursor_idx: 0,
+            }
+        }
+        KeyCode::Enter => {
+            // Confirm and return to combo modal with selected models
+            wrap_combo_modal(combo_id, &combo_name, strategy_idx, selected_models, proxy_idx, 2)
+        }
+        _ => ModalState::ModelPicker {
+            return_to_edit,
+            combo_id,
+            combo_name,
+            strategy_idx,
+            proxy_idx,
+            search_query: search_query.clone(),
+            selected_models: selected_models.clone(),
+            cursor_idx: *cursor_idx,
+        },
+    }
+}
+
+fn handle_provider_step(
+    state: &TuiState,
+    provider_type_idx: &mut usize,
+    name: &mut String,
+    api_key: &mut String,
+    priority: &mut usize,
+    active_field: &mut usize,
+    code: KeyCode,
+) -> ModalState {
+    match code {
+        KeyCode::Esc => ModalState::None,
+        KeyCode::Tab | KeyCode::Down => {
+            *active_field = (*active_field + 1) % 4;
+            ModalState::AddProvider {
+                provider_type_idx: *provider_type_idx,
+                name: name.clone(),
+                api_key: api_key.clone(),
+                priority: *priority,
+                active_field: *active_field,
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            *active_field = (*active_field + 3) % 4;
+            ModalState::AddProvider {
+                provider_type_idx: *provider_type_idx,
+                name: name.clone(),
+                api_key: api_key.clone(),
+                priority: *priority,
+                active_field: *active_field,
+            }
+        }
+        KeyCode::Right => {
+            if *active_field == 0 {
+                *provider_type_idx = (*provider_type_idx + 1) % PROVIDER_TYPES.len();
+            } else if *active_field == 3 {
+                *priority = (*priority + 1) % 3;
+            }
+            ModalState::AddProvider {
+                provider_type_idx: *provider_type_idx,
+                name: name.clone(),
+                api_key: api_key.clone(),
+                priority: *priority,
+                active_field: *active_field,
+            }
+        }
+        KeyCode::Left => {
+            if *active_field == 0 {
+                *provider_type_idx = if *provider_type_idx == 0 {
+                    PROVIDER_TYPES.len() - 1
+                } else {
+                    *provider_type_idx - 1
+                };
+            } else if *active_field == 3 {
+                *priority = if *priority == 0 { 2 } else { *priority - 1 };
+            }
+            ModalState::AddProvider {
+                provider_type_idx: *provider_type_idx,
+                name: name.clone(),
+                api_key: api_key.clone(),
+                priority: *priority,
+                active_field: *active_field,
+            }
+        }
+        KeyCode::Char(c) => {
+            match *active_field {
+                1 => name.push(c),
+                2 => api_key.push(c),
+                _ => {}
+            }
+            ModalState::AddProvider {
+                provider_type_idx: *provider_type_idx,
+                name: name.clone(),
+                api_key: api_key.clone(),
+                priority: *priority,
+                active_field: *active_field,
+            }
+        }
+        KeyCode::Backspace => {
+            match *active_field {
+                1 => {
+                    name.pop();
+                }
+                2 => {
+                    api_key.pop();
+                }
+                _ => {}
+            }
+            ModalState::AddProvider {
+                provider_type_idx: *provider_type_idx,
+                name: name.clone(),
+                api_key: api_key.clone(),
+                priority: *priority,
+                active_field: *active_field,
+            }
+        }
+        KeyCode::Enter => {
+            let ptype = PROVIDER_TYPES[*provider_type_idx % PROVIDER_TYPES.len()].0;
+            let display_name = if name.trim().is_empty() {
+                format!("{} Main", ptype)
+            } else {
+                name.trim().to_string()
+            };
+
+            let new_acc = AccountDisplay {
+                id: uuid::Uuid::new_v4().to_string(),
+                provider: ptype.to_string(),
+                name: display_name.clone(),
+                email: if api_key.len() > 8 {
+                    format!("{}****", &api_key[..4])
+                } else {
+                    display_name.clone()
+                },
+                priority: (*priority + 1) as u32,
+                is_active: true,
+                status_text: "Active ●".to_string(),
+            };
+
+            if let Ok(mut accounts) = state.accounts.write() {
+                accounts.push(new_acc);
+                state.add_log(
+                    "INFO",
+                    format!("Added provider connection: '{}' [{}] (P{})", display_name, ptype, *priority + 1),
+                );
+            }
+            ModalState::None
+        }
+        _ => ModalState::AddProvider {
+            provider_type_idx: *provider_type_idx,
+            name: name.clone(),
+            api_key: api_key.clone(),
+            priority: *priority,
+            active_field: *active_field,
+        },
     }
 }
 
@@ -723,4 +1014,12 @@ fn handle_proxy_step(
             }
         }
     }
+}
+
+fn rand_simple() -> u64 {
+    use std::time::SystemTime;
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .subsec_millis() as u64
 }

@@ -19,44 +19,40 @@ pub const COMBO_STRATEGIES: &[(&str, &str)] = &[
     ("context-relay", "Relay conversation context across models"),
     ("headroom", "Reserve buffer headroom before rate limits"),
     ("strict-random", "True uniform random selection"),
-    ("auto", "16-factor automatic score-based routing"),
-    ("lkgp", "Last Known Good Provider fast-path"),
-    ("pipeline", "Sequential multi-model processing pipeline"),
 ];
 
-pub const KNOWN_MODELS: &[&str] = &[
-    "antigravity/claude-sonnet-4-6",
-    "antigravity/claude-opus-4-6-thinking",
-    "antigravity/gemini-3.7-flash-low",
-    "antigravity/gemini-3.7-flash-tiered",
-    "antigravity/gemini-2.5-flash",
-    "antigravity/gemini-3.6-flash-high",
-    "antigravity/gemini-pro-agent",
-    "claude-sonnet-4-6",
-    "claude-opus-4-6-thinking",
-    "gemini-3.7-flash-low",
-    "gemini-2.5-flash",
-    "deepseek/deepseek-r1",
-    "deepseek/deepseek-v3",
-    "openrouter/auto",
-    "openai/gpt-4o",
-    "openai/o3-mini",
-    "groq/llama-3.3-70b-versatile",
+pub const KNOWN_MODELS: &[(&str, &str)] = &[
+    ("antigravity/claude-sonnet-4-6", "Google Antigravity / Claude 3.7 Sonnet (Agentic)"),
+    ("antigravity/claude-opus-4-6-thinking", "Google Antigravity / Claude 3.7 Opus Thinking"),
+    ("antigravity/gemini-3.7-flash-low", "Google Antigravity / Gemini 2.5 Flash (Low Tier)"),
+    ("antigravity/gemini-3.7-flash-tiered", "Google Antigravity / Gemini 2.5 Flash (Tiered)"),
+    ("antigravity/gemini-2.5-flash", "Google Antigravity / Gemini 2.5 Flash"),
+    ("antigravity/gemini-3.6-flash-high", "Google Antigravity / Gemini 2.5 Pro (High Tier)"),
+    ("antigravity/gemini-pro-agent", "Google Antigravity / Gemini 2.5 Pro Agent"),
+    ("deepseek/deepseek-r1", "DeepSeek R1 Full Reasoning Model"),
+    ("deepseek/deepseek-v3", "DeepSeek V3 671B MoE General Chat"),
+    ("openrouter/auto", "OpenRouter Smart Auto Router"),
+    ("openrouter/anthropic/claude-3.7-sonnet", "OpenRouter Anthropic Claude 3.7 Sonnet"),
+    ("openrouter/deepseek/deepseek-r1", "OpenRouter DeepSeek R1 Reasoning"),
+    ("openai/gpt-4o", "OpenAI GPT-4o Multimodal Flagship"),
+    ("openai/gpt-4o-mini", "OpenAI GPT-4o Mini Fast & Efficient"),
+    ("openai/o3-mini", "OpenAI o3 Mini Fast Reasoning Model"),
+    ("anthropic/claude-3-5-sonnet-20241022", "Anthropic Claude 3.5 Sonnet v2"),
+    ("anthropic/claude-3-7-sonnet", "Anthropic Claude 3.7 Sonnet Hybrid"),
+    ("groq/llama-3.3-70b-versatile", "Groq LPU LLaMA 3.3 70B (Fast Inference)"),
+    ("groq/deepseek-r1-distill-llama-70b", "Groq LPU DeepSeek R1 Distill 70B"),
 ];
 
-pub fn find_model_suggestion(input: &str) -> Option<&'static str> {
-    let last_token = input.split(',').last()?.trim();
-    if last_token.is_empty() {
-        return None;
-    }
-    let token_lower = last_token.to_lowercase();
-    for &model in KNOWN_MODELS {
-        if model.to_lowercase().starts_with(&token_lower) && model.len() > last_token.len() {
-            return Some(&model[last_token.len()..]);
-        }
-    }
-    None
-}
+pub const PROVIDER_TYPES: &[(&str, &str)] = &[
+    ("openrouter", "OpenRouter Aggregator API (openrouter.ai)"),
+    ("deepseek", "DeepSeek Platform API (api.deepseek.com)"),
+    ("groq", "Groq Ultra-Fast LPU (api.groq.com)"),
+    ("openai", "OpenAI Official API (api.openai.com)"),
+    ("anthropic", "Anthropic Official API (api.anthropic.com)"),
+    ("google", "Google Gemini API (generativelanguage.googleapis.com)"),
+    ("kiro", "Kiro Gateway API"),
+    ("custom", "Custom OpenAI-compatible Endpoint"),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTab {
@@ -68,41 +64,55 @@ pub enum ActiveTab {
 }
 
 impl ActiveTab {
-    pub fn from_index(idx: usize) -> Self {
-        match idx {
-            0 => ActiveTab::Overview,
-            1 => ActiveTab::Combos,
-            2 => ActiveTab::Providers,
-            3 => ActiveTab::Proxies,
-            4 => ActiveTab::Timeline,
-            _ => ActiveTab::Overview,
+    pub fn next(self) -> Self {
+        match self {
+            ActiveTab::Overview => ActiveTab::Combos,
+            ActiveTab::Combos => ActiveTab::Providers,
+            ActiveTab::Providers => ActiveTab::Proxies,
+            ActiveTab::Proxies => ActiveTab::Timeline,
+            ActiveTab::Timeline => ActiveTab::Overview,
         }
     }
 
-    pub fn next(&self) -> Self {
-        Self::from_index((*self as usize + 1) % 5)
-    }
-
-    pub fn prev(&self) -> Self {
-        Self::from_index((*self as usize + 4) % 5)
+    pub fn prev(self) -> Self {
+        match self {
+            ActiveTab::Overview => ActiveTab::Timeline,
+            ActiveTab::Combos => ActiveTab::Overview,
+            ActiveTab::Providers => ActiveTab::Combos,
+            ActiveTab::Proxies => ActiveTab::Providers,
+            ActiveTab::Timeline => ActiveTab::Proxies,
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum ModalState {
     None,
+    Help,
     AddCombo {
         name: String,
         strategy_idx: usize,
-        models_input: String,
+        models: Vec<String>,
+        proxy_idx: usize,
         active_field: usize,
     },
     EditCombo {
         combo_id: String,
         name: String,
         strategy_idx: usize,
-        models_input: String,
+        models: Vec<String>,
+        proxy_idx: usize,
         active_field: usize,
+    },
+    ModelPicker {
+        return_to_edit: bool,
+        combo_id: Option<String>,
+        combo_name: String,
+        strategy_idx: usize,
+        proxy_idx: usize,
+        search_query: String,
+        selected_models: Vec<String>,
+        cursor_idx: usize,
     },
     AddProxy {
         name: String,
@@ -119,22 +129,13 @@ pub enum ModalState {
         port: String,
         active_field: usize,
     },
-    Help,
-}
-
-#[derive(Debug, Clone)]
-pub struct LogEntry {
-    pub timestamp: String,
-    pub level: &'static str,
-    pub message: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct AccountDisplay {
-    pub provider: String,
-    pub email: String,
-    pub priority: u32,
-    pub is_active: bool,
+    AddProvider {
+        provider_type_idx: usize,
+        name: String,
+        api_key: String,
+        priority: usize,
+        active_field: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +145,17 @@ pub struct ComboDisplay {
     pub strategy: String,
     pub models: Vec<String>,
     pub proxy_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AccountDisplay {
+    pub id: String,
+    pub provider: String,
+    pub name: String,
+    pub email: String,
+    pub priority: u32,
+    pub is_active: bool,
+    pub status_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -167,24 +179,26 @@ pub struct TimelineItem {
     pub status_code: u16,
 }
 
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub timestamp: String,
+    pub level: &'static str,
+    pub message: String,
+}
+
 pub struct TuiState {
     pub port: u16,
     pub proxy: Option<String>,
     pub active_tab: RwLock<ActiveTab>,
-    pub modal: RwLock<ModalState>,
     pub selected_index: RwLock<usize>,
-
+    pub modal: RwLock<ModalState>,
     pub total_requests: AtomicU64,
     pub active_requests: AtomicU64,
     pub total_tokens: AtomicU64,
-    pub prompt_tokens: AtomicU64,
-    pub completion_tokens: AtomicU64,
-    pub compacted_tokens_saved: AtomicU64,
     pub start_time: Instant,
-
     pub logs: RwLock<VecDeque<LogEntry>>,
-    pub accounts: RwLock<Vec<AccountDisplay>>,
     pub combos: RwLock<Vec<ComboDisplay>>,
+    pub accounts: RwLock<Vec<AccountDisplay>>,
     pub proxies: RwLock<Vec<ProxyDisplay>>,
     pub timeline: RwLock<VecDeque<TimelineItem>>,
     pub recent_latencies: RwLock<Vec<u64>>,
@@ -192,57 +206,40 @@ pub struct TuiState {
 
 impl TuiState {
     pub fn new(port: u16, proxy: Option<String>) -> Self {
-        let initial_combos = vec![
-            ComboDisplay {
-                id: "1".to_string(),
-                name: "claude".to_string(),
-                strategy: "least-used".to_string(),
-                models: vec![
-                    "antigravity/claude-sonnet-4-6".to_string(),
-                    "antigravity/claude-opus-4-6-thinking".to_string(),
-                ],
-                proxy_name: Some("socks5h://127.0.0.1:5454".to_string()),
-            },
-            ComboDisplay {
-                id: "2".to_string(),
-                name: "antigravity".to_string(),
-                strategy: "priority".to_string(),
-                models: vec![
-                    "antigravity/gemini-3.7-flash-low".to_string(),
-                    "antigravity/gemini-2.5-flash".to_string(),
-                ],
-                proxy_name: Some("socks5h://127.0.0.1:5454".to_string()),
-            },
-        ];
-
-        let initial_proxies = vec![ProxyDisplay {
-            id: "1".to_string(),
-            name: "Default SOCKS5".to_string(),
-            protocol: "socks5h".to_string(),
-            host: "127.0.0.1".to_string(),
-            port: 5454,
-            status: "Active ●".to_string(),
-        }];
-
         Self {
             port,
             proxy,
             active_tab: RwLock::new(ActiveTab::Overview),
-            modal: RwLock::new(ModalState::None),
             selected_index: RwLock::new(0),
+            modal: RwLock::new(ModalState::None),
             total_requests: AtomicU64::new(0),
             active_requests: AtomicU64::new(0),
             total_tokens: AtomicU64::new(0),
-            prompt_tokens: AtomicU64::new(0),
-            completion_tokens: AtomicU64::new(0),
-            compacted_tokens_saved: AtomicU64::new(0),
             start_time: Instant::now(),
-            logs: RwLock::new(VecDeque::with_capacity(120)),
+            logs: RwLock::new(VecDeque::with_capacity(150)),
+            combos: RwLock::new(Vec::new()),
             accounts: RwLock::new(Vec::new()),
-            combos: RwLock::new(initial_combos),
-            proxies: RwLock::new(initial_proxies),
-            timeline: RwLock::new(VecDeque::with_capacity(60)),
-            recent_latencies: RwLock::new(vec![120, 140, 110, 180, 160, 130, 150, 140, 125, 135]),
+            proxies: RwLock::new(Vec::new()),
+            timeline: RwLock::new(VecDeque::with_capacity(50)),
+            recent_latencies: RwLock::new(Vec::new()),
+        }
+    }
+
+    pub fn set_accounts(&self, accs: Vec<AccountDisplay>) {
+        if let Ok(mut accounts) = self.accounts.write() {
+            *accounts = accs;
+        }
+    }
+
+    pub fn set_combos(&self, cmbs: Vec<ComboDisplay>) {
+        if let Ok(mut combos) = self.combos.write() {
+            *combos = cmbs;
+        }
+    }
+
+    pub fn set_proxies(&self, prxs: Vec<ProxyDisplay>) {
+        if let Ok(mut proxies) = self.proxies.write() {
+            *proxies = prxs;
         }
     }
 
@@ -250,8 +247,8 @@ impl TuiState {
         if let Ok(mut t) = self.active_tab.write() {
             *t = tab;
         }
-        if let Ok(mut s) = self.selected_index.write() {
-            *s = 0;
+        if let Ok(mut sel) = self.selected_index.write() {
+            *sel = 0;
         }
     }
 
@@ -268,15 +265,14 @@ impl TuiState {
     }
 
     pub fn add_log(&self, level: &'static str, message: impl Into<String>) {
-        let now = chrono::Local::now().format("%H:%M:%S").to_string();
         let entry = LogEntry {
-            timestamp: now,
+            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
             level,
             message: message.into(),
         };
 
         if let Ok(mut logs) = self.logs.write() {
-            if logs.len() >= 100 {
+            if logs.len() >= 150 {
                 logs.pop_front();
             }
             logs.push_back(entry);
@@ -288,21 +284,27 @@ impl TuiState {
         self.active_requests.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_request_end(&self, model: &str, account: &str, tokens: u64, latency_ms: u64, status_code: u16) {
+    pub fn record_request_end(
+        &self,
+        model: &str,
+        account: &str,
+        tokens: u64,
+        latency_ms: u64,
+        status_code: u16,
+    ) {
         self.active_requests.fetch_sub(1, Ordering::Relaxed);
         self.total_tokens.fetch_add(tokens, Ordering::Relaxed);
 
         if let Ok(mut latencies) = self.recent_latencies.write() {
-            if latencies.len() >= 30 {
+            if latencies.len() >= 40 {
                 latencies.remove(0);
             }
             latencies.push(latency_ms);
         }
 
-        let now = chrono::Local::now().format("%H:%M:%S").to_string();
         let item = TimelineItem {
-            id: uuid::Uuid::new_v4().to_string()[..8].to_string(),
-            timestamp: now,
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
             model: model.to_string(),
             account: account.to_string(),
             tokens,
@@ -318,17 +320,11 @@ impl TuiState {
         }
     }
 
-    pub fn set_accounts(&self, accs: Vec<AccountDisplay>) {
-        if let Ok(mut accounts) = self.accounts.write() {
-            *accounts = accs;
-        }
-    }
-
     pub fn uptime_formatted(&self) -> String {
-        let elapsed = self.start_time.elapsed().as_secs();
-        let hours = elapsed / 3600;
-        let mins = (elapsed % 3600) / 60;
-        let secs = elapsed % 60;
-        format!("{:02}:{:02}:{:02}", hours, mins, secs)
+        let secs = self.start_time.elapsed().as_secs();
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        let s = secs % 60;
+        format!("{:02}:{:02}:{:02}", hours, mins, s)
     }
 }

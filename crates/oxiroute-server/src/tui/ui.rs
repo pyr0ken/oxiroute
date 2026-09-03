@@ -1,45 +1,44 @@
+use crate::tui::state::{
+    ActiveTab, ModalState, TuiState, COMBO_STRATEGIES, KNOWN_MODELS, PROVIDER_TYPES,
+};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Row, Sparkline, Table, Tabs,
+        Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Row, Sparkline, Table,
     },
     Frame,
 };
 use std::sync::atomic::Ordering;
-use crate::tui::state::{
-    find_model_suggestion, ActiveTab, ModalState, TuiState, COMBO_STRATEGIES,
-};
 
 // ─── Theme Colors ─────────────────────────────────────────────────────────────
 const COLOR_CRIMSON: Color = Color::Rgb(220, 38, 38);
-const COLOR_BRIGHT_RED: Color = Color::Rgb(255, 75, 85);
-const COLOR_MUTED_BORDER: Color = Color::Rgb(65, 65, 80);
-const COLOR_TEXT_MUTED: Color = Color::Rgb(140, 140, 160);
+const COLOR_BRIGHT_RED: Color = Color::Rgb(255, 65, 75);
+const COLOR_DARK_RED: Color = Color::Rgb(153, 27, 27);
 const COLOR_TEXT_MAIN: Color = Color::Rgb(245, 245, 250);
+const COLOR_TEXT_MUTED: Color = Color::Rgb(150, 150, 165);
 const COLOR_GREEN_STATUS: Color = Color::Rgb(52, 211, 153);
 const COLOR_CYAN_ACCENT: Color = Color::Rgb(56, 189, 248);
 const COLOR_YELLOW_ACCENT: Color = Color::Rgb(251, 191, 36);
-const COLOR_MAGENTA_PROXY: Color = Color::Rgb(217, 70, 239);
+const COLOR_MAGENTA_PROXY: Color = Color::Rgb(192, 132, 252);
+const COLOR_BORDER_INACTIVE: Color = Color::Rgb(65, 65, 80);
 
 pub fn render(frame: &mut Frame, state: &TuiState) {
     let size = frame.area();
 
-    // Main layout: Header (6) -> Tab Bar (3) -> Body (Min 12) -> Footer (1)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .margin(1)
         .constraints([
-            Constraint::Length(6), // Ferris + ASCII Banner
-            Constraint::Length(3), // Tab navigation bar
-            Constraint::Min(12),   // Tab content
-            Constraint::Length(1), // Footer keymap
+            Constraint::Length(6), // Header
+            Constraint::Length(3), // Tab Bar
+            Constraint::Min(12),   // Content
+            Constraint::Length(1), // Footer Keymap
         ])
         .split(size);
 
-    render_header_banner(frame, chunks[0], state);
-    render_tab_bar(frame, chunks[1], state);
+    render_header(frame, chunks[0], state);
+    render_tabs(frame, chunks[1], state);
 
     let active_tab = *state.active_tab.read().unwrap();
     match active_tab {
@@ -50,210 +49,342 @@ pub fn render(frame: &mut Frame, state: &TuiState) {
         ActiveTab::Timeline => render_timeline_tab(frame, chunks[2], state),
     }
 
-    render_footer(frame, chunks[3], &active_tab);
+    render_footer(frame, chunks[3], state);
 
-    // Render Modal if active
-    let modal_guard = state.modal.read().unwrap();
-    match *modal_guard {
+    // Modal Overlays
+    let modal = state.modal.read().unwrap().clone();
+    match modal {
         ModalState::Help => render_help_modal(frame, size),
         ModalState::AddCombo {
-            ref name,
-            strategy_idx,
-            ref models_input,
-            active_field,
-        } => render_combo_form_modal(
-            frame,
-            size,
-            "✨ Create New Model Combo",
             name,
             strategy_idx,
-            models_input,
+            models,
+            proxy_idx,
+            active_field,
+        } => render_combo_modal(
+            frame,
+            size,
+            state,
+            "Create New Combo",
+            &name,
+            strategy_idx,
+            &models,
+            proxy_idx,
             active_field,
         ),
         ModalState::EditCombo {
-            ref name,
-            strategy_idx,
-            ref models_input,
-            active_field,
-            ..
-        } => render_combo_form_modal(
-            frame,
-            size,
-            "✏️ Edit Model Combo",
             name,
             strategy_idx,
-            models_input,
+            models,
+            proxy_idx,
             active_field,
-        ),
-        ModalState::AddProxy {
-            ref name,
-            protocol_idx,
-            ref host,
-            ref port,
-            active_field,
-        } => render_proxy_form_modal(
+            ..
+        } => render_combo_modal(
             frame,
             size,
-            "🌐 Register New Egress Proxy",
+            state,
+            "Edit Combo Configuration",
+            &name,
+            strategy_idx,
+            &models,
+            proxy_idx,
+            active_field,
+        ),
+        ModalState::ModelPicker {
+            search_query,
+            selected_models,
+            cursor_idx,
+            ..
+        } => render_model_picker_modal(
+            frame,
+            size,
+            &search_query,
+            &selected_models,
+            cursor_idx,
+        ),
+        ModalState::AddProxy {
             name,
             protocol_idx,
             host,
             port,
+            active_field,
+        } => render_proxy_modal(
+            frame,
+            size,
+            "Register New Proxy",
+            &name,
+            protocol_idx,
+            &host,
+            &port,
             active_field,
         ),
         ModalState::EditProxy {
-            ref name,
-            protocol_idx,
-            ref host,
-            ref port,
-            active_field,
-            ..
-        } => render_proxy_form_modal(
-            frame,
-            size,
-            "✏️ Edit Egress Proxy",
             name,
             protocol_idx,
             host,
             port,
+            active_field,
+            ..
+        } => render_proxy_modal(
+            frame,
+            size,
+            "Edit Proxy Configuration",
+            &name,
+            protocol_idx,
+            &host,
+            &port,
+            active_field,
+        ),
+        ModalState::AddProvider {
+            provider_type_idx,
+            name,
+            api_key,
+            priority,
+            active_field,
+        } => render_provider_modal(
+            frame,
+            size,
+            provider_type_idx,
+            &name,
+            &api_key,
+            priority,
             active_field,
         ),
         ModalState::None => {}
     }
 }
 
-fn render_header_banner(frame: &mut Frame, area: Rect, state: &TuiState) {
-    let banner_chunks = Layout::default()
+// ─── Header ──────────────────────────────────────────────────────────────────
+fn render_header(frame: &mut Frame, area: Rect, state: &TuiState) {
+    let header_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(52), Constraint::Min(20)])
+        .constraints([Constraint::Min(48), Constraint::Percentage(48)])
         .split(area);
 
-    // High-Fidelity Ferris the Rust Crab + Stylized OXIRUTE Typography
     let ascii_art = vec![
         Line::from(vec![
-            Span::styled("     _~^~^~_      ", Style::default().fg(COLOR_BRIGHT_RED).add_modifier(Modifier::BOLD)),
-            Span::styled("____  _  _ ___ ___  _   _ _____ ___ ", Style::default().fg(COLOR_CRIMSON).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "     _~^~^~_      ",
+                Style::default()
+                    .fg(COLOR_BRIGHT_RED)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "____  _  _ ___ ___  _   _ _____ ___ ",
+                Style::default()
+                    .fg(COLOR_CRIMSON)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
-            Span::styled(" \\) /  o o  \\ (/ ", Style::default().fg(COLOR_BRIGHT_RED).add_modifier(Modifier::BOLD)),
-            Span::styled("/ __ \\( \\/ )_ _| _ \\/ | | |_   _| __|", Style::default().fg(COLOR_CRIMSON).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " \\) /  o o  \\ (/ ",
+                Style::default()
+                    .fg(COLOR_BRIGHT_RED)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "/ __ \\( \\/ )_ _| _ \\/ | | |_   _| __|",
+                Style::default()
+                    .fg(COLOR_CRIMSON)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled("   '_   -   _'   ", Style::default().fg(COLOR_YELLOW_ACCENT)),
-            Span::styled("| |  | |)  ( | ||   /| |_| | | | | _|  ", Style::default().fg(COLOR_BRIGHT_RED).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "| |  | |)  ( | ||   /| |_| | | | | _|  ",
+                Style::default()
+                    .fg(COLOR_BRIGHT_RED)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled("   / '-----' \\   ", Style::default().fg(COLOR_BRIGHT_RED)),
-            Span::styled("| |__| /_/\\_\\___|_|_\\\\___/  |_| |___| ", Style::default().fg(COLOR_BRIGHT_RED)),
+            Span::styled(
+                "| |__| /_/\\_\\___|_|_\\\\___/  |_| |___| ",
+                Style::default().fg(COLOR_BRIGHT_RED),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("  🦀 Ferris Gate  ", Style::default().fg(COLOR_BRIGHT_RED).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  🦀 Ferris Gate  ",
+                Style::default()
+                    .fg(COLOR_BRIGHT_RED)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" \\____/  ", Style::default().fg(COLOR_CRIMSON)),
-            Span::styled("⚡ AI GATEWAY (PURE RUST) ⚡ ", Style::default().fg(COLOR_YELLOW_ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "⚡ AI GATEWAY (PURE RUST) ⚡ ",
+                Style::default()
+                    .fg(COLOR_YELLOW_ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("v0.1.0", Style::default().fg(COLOR_TEXT_MUTED)),
         ]),
     ];
 
-    frame.render_widget(Paragraph::new(ascii_art), banner_chunks[0]);
+    let logo_widget = Paragraph::new(ascii_art);
+    frame.render_widget(logo_widget, header_chunks[0]);
 
-    // Metadata & live quick telemetry
-    let proxy_text = state.proxy.as_deref().unwrap_or("Direct (None)");
+    let proxy_text = state
+        .proxy
+        .as_deref()
+        .unwrap_or("Direct Egress (None)");
+
     let meta_lines = vec![
         Line::from(vec![
             Span::styled("● Server Status: ", Style::default().fg(COLOR_TEXT_MUTED)),
-            Span::styled("ACTIVE (Running)", Style::default().fg(COLOR_GREEN_STATUS).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "ACTIVE (Running)",
+                Style::default()
+                    .fg(COLOR_GREEN_STATUS)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("   "),
             Span::styled("Port: ", Style::default().fg(COLOR_TEXT_MUTED)),
-            Span::styled(format!("http://127.0.0.1:{}", state.port), Style::default().fg(COLOR_CYAN_ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("http://127.0.0.1:{}", state.port),
+                Style::default()
+                    .fg(COLOR_CYAN_ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled("⚡ Egress Proxy:  ", Style::default().fg(COLOR_TEXT_MUTED)),
-            Span::styled(proxy_text, Style::default().fg(COLOR_MAGENTA_PROXY).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                proxy_text,
+                Style::default()
+                    .fg(COLOR_MAGENTA_PROXY)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("   "),
             Span::styled("Memory: ", Style::default().fg(COLOR_TEXT_MUTED)),
-            Span::styled("< 10 MB RAM", Style::default().fg(COLOR_GREEN_STATUS).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "< 10 MB RAM",
+                Style::default()
+                    .fg(COLOR_GREEN_STATUS)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled("⏱️  Uptime:        ", Style::default().fg(COLOR_TEXT_MUTED)),
-            Span::styled(state.uptime_formatted(), Style::default().fg(COLOR_YELLOW_ACCENT)),
+            Span::styled(
+                state.uptime_formatted(),
+                Style::default().fg(COLOR_YELLOW_ACCENT),
+            ),
             Span::raw("   "),
             Span::styled("Circuit Breakers: ", Style::default().fg(COLOR_TEXT_MUTED)),
             Span::styled("CLOSED ● Healthy", Style::default().fg(COLOR_GREEN_STATUS)),
         ]),
     ];
 
-    let meta_block = Block::default()
-        .borders(Borders::LEFT)
-        .border_style(Style::default().fg(COLOR_MUTED_BORDER));
-
-    frame.render_widget(
-        Paragraph::new(meta_lines).block(meta_block),
-        banner_chunks[1],
-    );
-}
-
-fn render_tab_bar(frame: &mut Frame, area: Rect, state: &TuiState) {
-    let active_tab = *state.active_tab.read().unwrap();
-
-    let tab_titles = vec![
-        Line::from(vec![
-            Span::styled("[1] ", Style::default().fg(COLOR_YELLOW_ACCENT)),
-            Span::raw("📊 Dashboard"),
-        ]),
-        Line::from(vec![
-            Span::styled("[2] ", Style::default().fg(COLOR_YELLOW_ACCENT)),
-            Span::raw("🔀 Combos (18)"),
-        ]),
-        Line::from(vec![
-            Span::styled("[3] ", Style::default().fg(COLOR_YELLOW_ACCENT)),
-            Span::raw("👥 Providers (12)"),
-        ]),
-        Line::from(vec![
-            Span::styled("[4] ", Style::default().fg(COLOR_YELLOW_ACCENT)),
-            Span::raw("🌐 Proxy Pool"),
-        ]),
-        Line::from(vec![
-            Span::styled("[5] ", Style::default().fg(COLOR_YELLOW_ACCENT)),
-            Span::raw("📈 Timeline & Usage"),
-        ]),
-    ];
-
-    let tabs = Tabs::new(tab_titles)
+    let meta_widget = Paragraph::new(meta_lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(COLOR_MUTED_BORDER)),
+                .border_style(Style::default().fg(COLOR_DARK_RED))
+                .title(Span::styled(
+                    " System Runtime ",
+                    Style::default().fg(COLOR_BRIGHT_RED),
+                )),
         )
-        .select(active_tab as usize)
-        .style(Style::default().fg(COLOR_TEXT_MUTED))
-        .highlight_style(
-            Style::default()
-                .fg(COLOR_TEXT_MAIN)
-                .bg(COLOR_CRIMSON)
-                .add_modifier(Modifier::BOLD),
-        )
-        .divider(" │ ");
+        .alignment(Alignment::Left);
 
-    frame.render_widget(tabs, area);
+    frame.render_widget(meta_widget, header_chunks[1]);
 }
 
-// ─── TAB 1: OVERVIEW ──────────────────────────────────────────────────────────
+// ─── Tabs ────────────────────────────────────────────────────────────────────
+fn render_tabs(frame: &mut Frame, area: Rect, state: &TuiState) {
+    let current_tab = *state.active_tab.read().unwrap();
+    let combos_count = state.combos.read().unwrap().len();
+    let accounts_count = state.accounts.read().unwrap().len();
+    let proxies_count = state.proxies.read().unwrap().len();
+    let timeline_count = state.timeline.read().unwrap().len();
+
+    let tab_titles = [
+        (" [1] 📊 Dashboard ", ActiveTab::Overview),
+        (
+            &format!(" [2] 🔀 Combos ({}) ", combos_count),
+            ActiveTab::Combos,
+        ),
+        (
+            &format!(" [3] 👥 Providers ({}) ", accounts_count),
+            ActiveTab::Providers,
+        ),
+        (
+            &format!(" [4] 🌐 Proxy Pool ({}) ", proxies_count),
+            ActiveTab::Proxies,
+        ),
+        (
+            &format!(" [5] 📈 Timeline ({}) ", timeline_count),
+            ActiveTab::Timeline,
+        ),
+    ];
+
+    let spans: Vec<Span> = tab_titles
+        .iter()
+        .map(|(title, tab)| {
+            if *tab == current_tab {
+                Span::styled(
+                    *title,
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(COLOR_BRIGHT_RED)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(
+                    *title,
+                    Style::default()
+                        .fg(COLOR_TEXT_MUTED)
+                        .bg(Color::Rgb(30, 30, 40)),
+                )
+            }
+        })
+        .collect();
+
+    let mut tab_line_spans = Vec::new();
+    for (i, span) in spans.into_iter().enumerate() {
+        if i > 0 {
+            tab_line_spans.push(Span::raw(" "));
+        }
+        tab_line_spans.push(span);
+    }
+
+    let p = Paragraph::new(Line::from(tab_line_spans))
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(COLOR_DARK_RED)),
+        )
+        .alignment(Alignment::Center);
+
+    frame.render_widget(p, area);
+}
+
+// ─── Tab 1: Overview ─────────────────────────────────────────────────────────
 fn render_overview_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
-    let main_split = Layout::default()
+    let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Min(8)])
+        .constraints([Constraint::Length(8), Constraint::Min(8)])
         .split(area);
 
-    let top_split = Layout::default()
+    let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(main_split[0]);
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[0]);
 
-    // Left: Live Metrics
     let total_reqs = state.total_requests.load(Ordering::Relaxed);
     let active_reqs = state.active_requests.load(Ordering::Relaxed);
     let tokens = state.total_tokens.load(Ordering::Relaxed);
+
+    let active_color = if active_reqs > 0 {
+        COLOR_YELLOW_ACCENT
+    } else {
+        COLOR_GREEN_STATUS
+    };
 
     let metrics_text = vec![
         Line::from(vec![
@@ -264,15 +395,12 @@ fn render_overview_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
                     .fg(COLOR_TEXT_MAIN)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw("       "),
-            Span::styled("Active Streams: ", Style::default().fg(COLOR_TEXT_MUTED)),
+        ]),
+        Line::from(vec![
+            Span::styled("Active Streams:     ", Style::default().fg(COLOR_TEXT_MUTED)),
             Span::styled(
-                format!("{}", active_reqs),
-                Style::default().fg(if active_reqs > 0 {
-                    COLOR_YELLOW_ACCENT
-                } else {
-                    COLOR_GREEN_STATUS
-                }),
+                format!("{} in-flight", active_reqs),
+                Style::default().fg(active_color).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
@@ -293,131 +421,141 @@ fn render_overview_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
         ]),
     ];
 
-    let metrics_block = Block::default()
-        .title(" 📊 Real-time Gateway Metrics ")
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(COLOR_CYAN_ACCENT));
-
-    let m_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Length(3)])
-        .margin(1)
-        .split(top_split[0]);
-
-    frame.render_widget(Paragraph::new(metrics_text), m_chunks[0]);
-
-    if let Ok(latencies) = state.recent_latencies.read() {
-        let sparkline = Sparkline::default()
-            .block(
-                Block::default()
-                    .title(" TTFT Latency (ms) ")
-                    .borders(Borders::NONE),
-            )
-            .style(Style::default().fg(COLOR_YELLOW_ACCENT))
-            .data(&*latencies);
-        frame.render_widget(sparkline, m_chunks[1]);
-    }
-    frame.render_widget(metrics_block, top_split[0]);
-
-    // Right: Top Active Accounts
-    let accounts_guard = state.accounts.read().unwrap();
-    let acc_items: Vec<ListItem> = accounts_guard
-        .iter()
-        .take(5)
-        .map(|acc| {
-            let status = if acc.is_active {
-                Span::styled("● ", Style::default().fg(COLOR_GREEN_STATUS))
-            } else {
-                Span::styled("○ ", Style::default().fg(COLOR_TEXT_MUTED))
-            };
-            let badge = Span::styled(
-                format!("[{}] ", acc.provider),
+    let metrics_block = Paragraph::new(metrics_text).block(
+        Block::default()
+            .title(Span::styled(
+                " 📊 Live Stream Metrics ",
                 Style::default().fg(COLOR_BRIGHT_RED),
-            );
-            let email = Span::styled(&acc.email, Style::default().fg(COLOR_TEXT_MAIN));
-            let p = Span::styled(
-                format!(" (P{})", acc.priority),
-                Style::default().fg(COLOR_TEXT_MUTED),
-            );
-            ListItem::new(Line::from(vec![status, badge, email, p]))
+            ))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(COLOR_DARK_RED)),
+    );
+    frame.render_widget(metrics_block, top_chunks[0]);
+
+    let latencies_guard = state.recent_latencies.read().unwrap();
+    let spark_data: Vec<u64> = if latencies_guard.is_empty() {
+        vec![0, 0, 0, 0, 0]
+    } else {
+        latencies_guard.clone()
+    };
+
+    let sparkline = Sparkline::default()
+        .block(
+            Block::default()
+                .title(Span::styled(
+                    " ⚡ Latency TTFT (ms) ",
+                    Style::default().fg(COLOR_BRIGHT_RED),
+                ))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(COLOR_DARK_RED)),
+        )
+        .data(&spark_data)
+        .style(Style::default().fg(COLOR_BRIGHT_RED));
+    frame.render_widget(sparkline, top_chunks[1]);
+
+    let logs_guard = state.logs.read().unwrap();
+    let log_items: Vec<ListItem> = logs_guard
+        .iter()
+        .rev()
+        .map(|entry| {
+            let level_style = match entry.level {
+                "ERROR" => Style::default()
+                    .fg(COLOR_BRIGHT_RED)
+                    .add_modifier(Modifier::BOLD),
+                "WARN" => Style::default()
+                    .fg(COLOR_YELLOW_ACCENT)
+                    .add_modifier(Modifier::BOLD),
+                _ => Style::default().fg(COLOR_CYAN_ACCENT),
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("[{}] ", entry.timestamp),
+                    Style::default().fg(COLOR_TEXT_MUTED),
+                ),
+                Span::styled(format!("[{}] ", entry.level), level_style),
+                Span::styled(&entry.message, Style::default().fg(COLOR_TEXT_MAIN)),
+            ]))
         })
         .collect();
 
-    let acc_block = Block::default()
-        .title(format!(
-            " 👥 Fast Provider Overview ({}) ",
-            accounts_guard.len()
-        ))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(COLOR_GREEN_STATUS));
-
-    frame.render_widget(List::new(acc_items).block(acc_block), top_split[1]);
-
-    // Bottom: Live Stream Logs
-    render_logs_widget(frame, main_split[1], state);
+    let logs_list = List::new(log_items).block(
+        Block::default()
+            .title(Span::styled(
+                " 📜 Real-time Stream & Router Logs (Press 'c' to clear) ",
+                Style::default().fg(COLOR_BRIGHT_RED),
+            ))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(COLOR_DARK_RED)),
+    );
+    frame.render_widget(logs_list, chunks[1]);
 }
 
-// ─── TAB 2: COMBOS STUDIO ───────────────────────────────────────────────────
+// ─── Tab 2: Combos ───────────────────────────────────────────────────────────
 fn render_combos_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .split(area);
+
     let combos_guard = state.combos.read().unwrap();
     let sel_idx = *state.selected_index.read().unwrap();
 
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(area);
-
-    // Left list
     let items: Vec<ListItem> = combos_guard
         .iter()
         .enumerate()
-        .map(|(idx, combo)| {
-            let is_sel = idx == sel_idx;
-            let bullet = if is_sel { "▶ " } else { "  " };
-            let style = if is_sel {
+        .map(|(i, combo)| {
+            let is_selected = i == sel_idx;
+            let style = if is_selected {
                 Style::default()
-                    .fg(COLOR_YELLOW_ACCENT)
+                    .fg(Color::Black)
+                    .bg(COLOR_BRIGHT_RED)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(COLOR_TEXT_MAIN)
             };
 
-            let name_span = Span::styled(format!("{}{}", bullet, combo.name), style);
-            let strat_span = Span::styled(
-                format!(" [{}]", combo.strategy),
-                Style::default().fg(COLOR_CYAN_ACCENT),
-            );
-            let count_span = Span::styled(
-                format!(" ({} models)", combo.models.len()),
-                Style::default().fg(COLOR_TEXT_MUTED),
-            );
-
-            ListItem::new(Line::from(vec![name_span, strat_span, count_span]))
+            let prefix = if is_selected { " ▶ " } else { "   " };
+            ListItem::new(format!(
+                "{}{} [{}] ({} models)",
+                prefix,
+                combo.name,
+                combo.strategy,
+                combo.models.len()
+            ))
+            .style(style)
         })
         .collect();
 
-    let list_block = Block::default()
-        .title(format!(
-            " 🔀 Active Combos ({}) - [a] Add [e] Edit [d] Delete ",
-            combos_guard.len()
-        ))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(COLOR_YELLOW_ACCENT));
+    let combos_list = List::new(items).block(
+        Block::default()
+            .title(Span::styled(
+                " 🔀 Active Combos [a: Add | e: Edit | d: Delete] ",
+                Style::default().fg(COLOR_BRIGHT_RED),
+            ))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(COLOR_DARK_RED)),
+    );
+    frame.render_widget(combos_list, chunks[0]);
 
-    frame.render_widget(List::new(items).block(list_block), chunks[0]);
+    let detail_lines = if let Some(combo) = combos_guard.get(sel_idx) {
+        let strat_desc = COMBO_STRATEGIES
+            .iter()
+            .find(|(s, _)| *s == combo.strategy)
+            .map(|(_, d)| *d)
+            .unwrap_or("Custom strategy");
 
-    // Right details
-    if let Some(combo) = combos_guard.get(sel_idx) {
-        let mut detail_lines = vec![
+        let mut lines = vec![
             Line::from(vec![
                 Span::styled("Combo Name:       ", Style::default().fg(COLOR_TEXT_MUTED)),
                 Span::styled(
                     &combo.name,
                     Style::default()
-                        .fg(COLOR_TEXT_MAIN)
+                        .fg(COLOR_BRIGHT_RED)
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
@@ -426,8 +564,12 @@ fn render_combos_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
                 Span::styled(
                     &combo.strategy,
                     Style::default()
-                        .fg(COLOR_CYAN_ACCENT)
+                        .fg(COLOR_YELLOW_ACCENT)
                         .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" ({})", strat_desc),
+                    Style::default().fg(COLOR_TEXT_MUTED),
                 ),
             ]),
             Line::from(vec![
@@ -436,41 +578,54 @@ fn render_combos_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
                     combo
                         .proxy_name
                         .as_deref()
-                        .unwrap_or("Default / System Proxy"),
+                        .unwrap_or("Default / None (Direct)"),
                     Style::default().fg(COLOR_MAGENTA_PROXY),
                 ),
             ]),
             Line::raw(""),
             Line::styled(
-                "📦 Attached Target Models (Order of Evaluation):",
-                Style::default()
-                    .fg(COLOR_YELLOW_ACCENT)
-                    .add_modifier(Modifier::UNDERLINED),
+                "─── Fallback & Execution Model Pipeline ───",
+                Style::default().fg(COLOR_DARK_RED),
             ),
         ];
 
-        for (i, m) in combo.models.iter().enumerate() {
-            detail_lines.push(Line::from(vec![
+        for (idx, model) in combo.models.iter().enumerate() {
+            lines.push(Line::from(vec![
                 Span::styled(
-                    format!("  {}. ", i + 1),
-                    Style::default().fg(COLOR_TEXT_MUTED),
+                    format!("  {:2}. ", idx + 1),
+                    Style::default().fg(COLOR_YELLOW_ACCENT),
                 ),
-                Span::styled(m, Style::default().fg(COLOR_GREEN_STATUS)),
+                Span::styled(
+                    model,
+                    Style::default()
+                        .fg(COLOR_CYAN_ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]));
         }
 
-        let detail_block = Block::default()
-            .title(" 🔍 Combo Blueprint & Target Ordering ")
+        lines
+    } else {
+        vec![Line::styled(
+            "No combo selected. Press 'a' to create one.",
+            Style::default().fg(COLOR_TEXT_MUTED),
+        )]
+    };
+
+    let details = Paragraph::new(detail_lines).block(
+        Block::default()
+            .title(Span::styled(
+                " ⚙️  Combo Pipeline Details ",
+                Style::default().fg(COLOR_BRIGHT_RED),
+            ))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(COLOR_CYAN_ACCENT))
-            .padding(ratatui::widgets::Padding::uniform(1));
-
-        frame.render_widget(Paragraph::new(detail_lines).block(detail_block), chunks[1]);
-    }
+            .border_style(Style::default().fg(COLOR_DARK_RED)),
+    );
+    frame.render_widget(details, chunks[1]);
 }
 
-// ─── TAB 3: PROVIDERS ────────────────────────────────────────────────────────
+// ─── Tab 3: Providers ────────────────────────────────────────────────────────
 fn render_providers_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
     let accounts_guard = state.accounts.read().unwrap();
     let sel_idx = *state.selected_index.read().unwrap();
@@ -478,74 +633,79 @@ fn render_providers_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
     let rows: Vec<Row> = accounts_guard
         .iter()
         .enumerate()
-        .map(|(idx, acc)| {
-            let is_sel = idx == sel_idx;
-            let style = if is_sel {
-                Style::default()
-                    .fg(COLOR_YELLOW_ACCENT)
-                    .add_modifier(Modifier::BOLD)
+        .map(|(i, acc)| {
+            let is_selected = i == sel_idx;
+            let status_badge = if acc.is_active {
+                if acc.status_text.is_empty() {
+                    Span::styled("Active ●", Style::default().fg(COLOR_GREEN_STATUS))
+                } else {
+                    Span::styled(&acc.status_text, Style::default().fg(COLOR_GREEN_STATUS))
+                }
             } else {
-                Style::default().fg(COLOR_TEXT_MAIN)
+                Span::styled("Disabled ○", Style::default().fg(COLOR_TEXT_MUTED))
             };
 
-            Row::new(vec![
-                if acc.is_active {
-                    "Active ●"
-                } else {
-                    "Disabled ○"
-                }
-                .to_string(),
-                acc.provider.clone(),
-                acc.email.clone(),
-                format!("P{}", acc.priority),
-                "Google AI Pro (g1-pro)".to_string(),
-                "Healthy (0 errors)".to_string(),
-            ])
-            .style(style)
+            let row = Row::new(vec![
+                Span::styled(
+                    if is_selected { "▶" } else { " " },
+                    Style::default().fg(COLOR_BRIGHT_RED),
+                ),
+                Span::styled(
+                    &acc.provider,
+                    Style::default()
+                        .fg(COLOR_CYAN_ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(&acc.email, Style::default().fg(COLOR_TEXT_MAIN)),
+                Span::styled(
+                    format!("P{}", acc.priority),
+                    Style::default().fg(COLOR_YELLOW_ACCENT),
+                ),
+                status_badge,
+            ]);
+
+            if is_selected {
+                row.style(Style::default().bg(Color::Rgb(40, 20, 25)))
+            } else {
+                row
+            }
         })
         .collect();
 
     let table = Table::new(
         rows,
         [
-            Constraint::Length(12),
+            Constraint::Length(2),
             Constraint::Length(16),
-            Constraint::Percentage(35),
+            Constraint::Length(32),
             Constraint::Length(10),
-            Constraint::Percentage(25),
-            Constraint::Percentage(15),
+            Constraint::Min(20),
         ],
     )
     .header(
-        Row::new(vec![
-            "Status",
-            "Provider",
-            "Identifier / Email",
-            "Priority",
-            "Tier / Plan",
-            "Health",
-        ])
-        .style(
-            Style::default()
-                .fg(COLOR_CYAN_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Row::new(vec!["", "Provider", "Identifier / Email", "Priority", "Health Status"])
+            .style(
+                Style::default()
+                    .fg(COLOR_BRIGHT_RED)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .bottom_margin(1),
     )
     .block(
         Block::default()
-            .title(format!(
-                " 👥 Provider Connections & Accounts ({}) - [a] Add [t] Test [r] Refresh ",
-                accounts_guard.len()
+            .title(Span::styled(
+                " 👥 Provider Connections [a: Add | t: Test Connection | r: Refresh Token | d: Delete] ",
+                Style::default().fg(COLOR_BRIGHT_RED),
             ))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(COLOR_GREEN_STATUS)),
+            .border_style(Style::default().fg(COLOR_DARK_RED)),
     );
 
     frame.render_widget(table, area);
 }
 
-// ─── TAB 4: PROXIES ──────────────────────────────────────────────────────────
+// ─── Tab 4: Proxies ──────────────────────────────────────────────────────────
 fn render_proxies_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
     let proxies_guard = state.proxies.read().unwrap();
     let sel_idx = *state.selected_index.read().unwrap();
@@ -553,92 +713,104 @@ fn render_proxies_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
     let rows: Vec<Row> = proxies_guard
         .iter()
         .enumerate()
-        .map(|(idx, pr)| {
-            let is_sel = idx == sel_idx;
-            let style = if is_sel {
-                Style::default()
-                    .fg(COLOR_YELLOW_ACCENT)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(COLOR_TEXT_MAIN)
-            };
+        .map(|(i, proxy)| {
+            let is_selected = i == sel_idx;
+            let row = Row::new(vec![
+                Span::styled(
+                    if is_selected { "▶" } else { " " },
+                    Style::default().fg(COLOR_BRIGHT_RED),
+                ),
+                Span::styled(
+                    &proxy.name,
+                    Style::default()
+                        .fg(COLOR_TEXT_MAIN)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(&proxy.protocol, Style::default().fg(COLOR_MAGENTA_PROXY)),
+                Span::styled(&proxy.host, Style::default().fg(COLOR_CYAN_ACCENT)),
+                Span::styled(
+                    format!("{}", proxy.port),
+                    Style::default().fg(COLOR_YELLOW_ACCENT),
+                ),
+                Span::styled(&proxy.status, Style::default().fg(COLOR_GREEN_STATUS)),
+            ]);
 
-            Row::new(vec![
-                pr.status.clone(),
-                pr.name.clone(),
-                pr.protocol.to_uppercase(),
-                pr.host.clone(),
-                format!("{}", pr.port),
-                "~185 ms".to_string(),
-            ])
-            .style(style)
+            if is_selected {
+                row.style(Style::default().bg(Color::Rgb(40, 20, 25)))
+            } else {
+                row
+            }
         })
         .collect();
 
     let table = Table::new(
         rows,
         [
-            Constraint::Length(12),
+            Constraint::Length(2),
             Constraint::Percentage(25),
             Constraint::Length(12),
             Constraint::Percentage(30),
             Constraint::Length(10),
-            Constraint::Percentage(20),
+            Constraint::Min(15),
         ],
     )
     .header(
-        Row::new(vec![
-            "Status",
-            "Proxy Name",
-            "Protocol",
-            "Host / IP",
-            "Port",
-            "Egress Ping",
-        ])
-        .style(
-            Style::default()
-                .fg(COLOR_MAGENTA_PROXY)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Row::new(vec!["", "Proxy Name", "Protocol", "Host", "Port", "Status"])
+            .style(
+                Style::default()
+                    .fg(COLOR_BRIGHT_RED)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .bottom_margin(1),
     )
     .block(
         Block::default()
-            .title(format!(
-                " 🌐 SOCKS5 / HTTP Proxy Pools ({}) - [a] Add [e] Edit [d] Delete [t] Test ",
-                proxies_guard.len()
+            .title(Span::styled(
+                " 🌐 Proxy Pool [a: Add Proxy | e: Edit | d: Delete] ",
+                Style::default().fg(COLOR_BRIGHT_RED),
             ))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(COLOR_MAGENTA_PROXY)),
+            .border_style(Style::default().fg(COLOR_DARK_RED)),
     );
 
     frame.render_widget(table, area);
 }
 
-// ─── TAB 5: TIMELINE & USAGE ─────────────────────────────────────────────────
+// ─── Tab 5: Timeline ─────────────────────────────────────────────────────────
 fn render_timeline_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
-    let tl_guard = state.timeline.read().unwrap();
-
-    let rows: Vec<Row> = tl_guard
+    let timeline_guard = state.timeline.read().unwrap();
+    let rows: Vec<Row> = timeline_guard
         .iter()
         .rev()
         .map(|item| {
-            let status_color = if item.status_code == 200 {
-                COLOR_GREEN_STATUS
+            let status_style = if item.status_code == 200 {
+                Style::default().fg(COLOR_GREEN_STATUS)
             } else {
-                COLOR_BRIGHT_RED
+                Style::default()
+                    .fg(COLOR_BRIGHT_RED)
+                    .add_modifier(Modifier::BOLD)
             };
 
             Row::new(vec![
-                item.timestamp.clone(),
-                item.model.clone(),
-                item.account.clone(),
-                format!("{} toks", item.tokens),
-                format!("{} ms", item.latency_ms),
-                format!("{}", item.status_code),
+                Span::styled(&item.timestamp, Style::default().fg(COLOR_TEXT_MUTED)),
+                Span::styled(
+                    &item.model,
+                    Style::default()
+                        .fg(COLOR_CYAN_ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(&item.account, Style::default().fg(COLOR_TEXT_MAIN)),
+                Span::styled(
+                    format!("{} tok", item.tokens),
+                    Style::default().fg(COLOR_YELLOW_ACCENT),
+                ),
+                Span::styled(
+                    format!("{} ms", item.latency_ms),
+                    Style::default().fg(COLOR_TEXT_MUTED),
+                ),
+                Span::styled(format!("{} OK", item.status_code), status_style),
             ])
-            .style(Style::default().fg(status_color))
-            .bottom_margin(0)
         })
         .collect();
 
@@ -647,105 +819,81 @@ fn render_timeline_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
         [
             Constraint::Length(10),
             Constraint::Percentage(35),
-            Constraint::Percentage(30),
+            Constraint::Percentage(25),
             Constraint::Length(12),
             Constraint::Length(12),
-            Constraint::Length(8),
+            Constraint::Length(10),
         ],
     )
     .header(
         Row::new(vec![
             "Time",
-            "Requested Model",
+            "Model",
             "Dispatched Account",
             "Tokens",
             "Latency",
-            "HTTP",
+            "Status",
         ])
         .style(
             Style::default()
-                .fg(COLOR_YELLOW_ACCENT)
+                .fg(COLOR_BRIGHT_RED)
                 .add_modifier(Modifier::BOLD),
-        ),
+        )
+        .bottom_margin(1),
     )
     .block(
         Block::default()
-            .title(format!(
-                " 📈 Request Timeline & Latency Stream History ({}) ",
-                tl_guard.len()
+            .title(Span::styled(
+                " 📈 Live Stream & Request Timeline History ",
+                Style::default().fg(COLOR_BRIGHT_RED),
             ))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(COLOR_YELLOW_ACCENT)),
+            .border_style(Style::default().fg(COLOR_DARK_RED)),
     );
 
     frame.render_widget(table, area);
 }
 
-fn render_logs_widget(frame: &mut Frame, area: Rect, state: &TuiState) {
-    let logs_guard = state.logs.read().unwrap();
-    let items: Vec<ListItem> = logs_guard
-        .iter()
-        .rev()
-        .map(|entry| {
-            let level_style = match entry.level {
-                "INFO" => Style::default().fg(COLOR_CYAN_ACCENT),
-                "WARN" => Style::default().fg(COLOR_YELLOW_ACCENT),
-                "ERROR" => Style::default().fg(COLOR_BRIGHT_RED),
-                _ => Style::default().fg(COLOR_TEXT_MAIN),
-            };
-
-            let line = Line::from(vec![
-                Span::styled(
-                    format!("[{}] ", entry.timestamp),
-                    Style::default().fg(COLOR_TEXT_MUTED),
-                ),
-                Span::styled(
-                    format!("[{}] ", entry.level),
-                    level_style.add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(&entry.message, Style::default().fg(COLOR_TEXT_MAIN)),
-            ]);
-
-            ListItem::new(line)
-        })
-        .collect();
-
-    let block = Block::default()
-        .title(" 📜 Live Stream & Egress Router Logs ")
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(COLOR_MUTED_BORDER));
-
-    frame.render_widget(List::new(items).block(block), area);
-}
-
-fn render_footer(frame: &mut Frame, area: Rect, active_tab: &ActiveTab) {
-    let base_keys = match active_tab {
-        ActiveTab::Combos => " [Tab/Shift+Tab] Tabs │ [1-5] Jump │ [a] Add │ [e] Edit │ [d] Delete │ [j/k] Select │ [q] Quit ",
-        ActiveTab::Providers => " [Tab/Shift+Tab] Tabs │ [1-5] Jump │ [a] Add │ [t] Test │ [r] Refresh │ [q] Quit ",
-        ActiveTab::Proxies => " [Tab/Shift+Tab] Tabs │ [1-5] Jump │ [a] Add │ [e] Edit │ [d] Delete │ [t] Test │ [q] Quit ",
-        _ => " [Tab/Shift+Tab] Tabs │ [1-5] Jump │ [c] Clear Logs │ [?] Help │ [q] Quit ",
+// ─── Footer ──────────────────────────────────────────────────────────────────
+fn render_footer(frame: &mut Frame, area: Rect, state: &TuiState) {
+    let tab = *state.active_tab.read().unwrap();
+    let base_keys = match tab {
+        ActiveTab::Combos => {
+            " [Tab/Shift+Tab] Tabs  [a] Add Combo  [e] Edit  [d] Delete  [j/k] Select  [?] Help  [q] Quit "
+        }
+        ActiveTab::Providers => {
+            " [Tab/Shift+Tab] Tabs  [a] Add Provider  [t] Test Connection  [r] Refresh Token  [d] Delete  [?] Help  [q] Quit "
+        }
+        ActiveTab::Proxies => {
+            " [Tab/Shift+Tab] Tabs  [a] Add Proxy  [e] Edit  [d] Delete  [j/k] Select  [?] Help  [q] Quit "
+        }
+        _ => " [Tab/Shift+Tab] Tabs  [1-5] Quick Jump  [c] Clear Logs  [j/k] Select  [?] Help  [q] Quit ",
     };
 
     let paragraph = Paragraph::new(Line::from(vec![Span::styled(
         base_keys,
-        Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::White)
+            .add_modifier(Modifier::BOLD),
     )]))
     .alignment(Alignment::Center);
 
     frame.render_widget(paragraph, area);
 }
 
-// ─── MODALS ──────────────────────────────────────────────────────────────────
+// ─── Help Modal ──────────────────────────────────────────────────────────────
 fn render_help_modal(frame: &mut Frame, area: Rect) {
-    let popup_area = centered_rect(65, 55, area);
+    let popup_area = centered_rect(65, 60, area);
     frame.render_widget(Clear, popup_area);
 
     let text = vec![
         Line::styled(
             "🦀 Oxiroute Terminal Help & Keymap",
-            Style::default().fg(COLOR_BRIGHT_RED).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(COLOR_BRIGHT_RED)
+                .add_modifier(Modifier::BOLD),
         ),
         Line::raw(""),
         Line::from(vec![
@@ -758,11 +906,19 @@ fn render_help_modal(frame: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled(" [a]              ", Style::default().fg(COLOR_YELLOW_ACCENT)),
-            Span::raw("Open Add Modal (Add Combo in Tab 2, Add Proxy in Tab 4)"),
+            Span::raw("Open Add Modal (Combo, Provider, or Proxy)"),
         ]),
         Line::from(vec![
             Span::styled(" [e]              ", Style::default().fg(COLOR_YELLOW_ACCENT)),
-            Span::raw("Edit selected item (Edit Combo in Tab 2, Edit Proxy in Tab 4)"),
+            Span::raw("Edit selected item (Combo / Proxy)"),
+        ]),
+        Line::from(vec![
+            Span::styled(" [t]              ", Style::default().fg(COLOR_YELLOW_ACCENT)),
+            Span::raw("Test provider connection health (Tab 3)"),
+        ]),
+        Line::from(vec![
+            Span::styled(" [r]              ", Style::default().fg(COLOR_YELLOW_ACCENT)),
+            Span::raw("Refresh provider OAuth token (Tab 3)"),
         ]),
         Line::from(vec![
             Span::styled(" [d]              ", Style::default().fg(COLOR_YELLOW_ACCENT)),
@@ -781,155 +937,332 @@ fn render_help_modal(frame: &mut Frame, area: Rect) {
             Span::raw("Close popup / Quit TUI"),
         ]),
         Line::raw(""),
-        Line::styled(
-            "Press [Esc] or [q] to close this help window.",
-            Style::default().fg(COLOR_TEXT_MUTED),
-        ),
+        Line::styled("Press [Esc] or [Enter] to close", Style::default().fg(COLOR_TEXT_MUTED)),
     ];
 
-    let block = Block::default()
-        .title(" Help & Controls ")
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(COLOR_CYAN_ACCENT))
-        .padding(ratatui::widgets::Padding::uniform(1));
+    let help_block = Paragraph::new(text)
+        .block(
+            Block::default()
+                .title(Span::styled(" ❓ Keyboard Shortcuts ", Style::default().fg(COLOR_BRIGHT_RED)))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Double)
+                .border_style(Style::default().fg(COLOR_BRIGHT_RED)),
+        )
+        .alignment(Alignment::Left);
 
-    frame.render_widget(Paragraph::new(text).block(block), popup_area);
+    frame.render_widget(help_block, popup_area);
 }
 
-fn render_combo_form_modal(
+// ─── Combo Modal (Add & Edit) ─────────────────────────────────────────────────
+fn render_combo_modal(
     frame: &mut Frame,
     area: Rect,
+    state: &TuiState,
     title: &str,
     name: &str,
     strategy_idx: usize,
-    models_input: &str,
+    models: &[String],
+    proxy_idx: usize,
     active_field: usize,
 ) {
-    let popup_area = centered_rect(68, 58, area);
+    let popup_area = centered_rect(75, 60, area);
     frame.render_widget(Clear, popup_area);
 
-    let (strat_name, strat_desc) = COMBO_STRATEGIES[strategy_idx % COMBO_STRATEGIES.len()];
-    let suggestion = find_model_suggestion(models_input);
+    let strat = COMBO_STRATEGIES[strategy_idx % COMBO_STRATEGIES.len()];
+    let proxies_guard = state.proxies.read().unwrap();
 
-    let mut model_line_spans = vec![
-        Span::styled(
-            "3. Target Models:  ",
-            Style::default().fg(if active_field == 2 {
-                COLOR_CYAN_ACCENT
-            } else {
-                COLOR_TEXT_MUTED
-            }),
-        ),
-        Span::styled(
-            format!(
-                "[ {} ]",
-                if models_input.is_empty() {
-                    "type model name (e.g. claude, gemini, deepseek)..."
-                } else {
-                    models_input
-                }
-            ),
-            Style::default().fg(COLOR_TEXT_MAIN),
-        ),
-    ];
+    let proxy_name = if proxy_idx == 0 {
+        "[None / Direct Egress]".to_string()
+    } else if let Some(p) = proxies_guard.get(proxy_idx - 1) {
+        format!("{} ({}://{}:{})", p.name, p.protocol, p.host, p.port)
+    } else {
+        "[None / Direct Egress]".to_string()
+    };
 
-    if let Some(sug) = suggestion {
-        model_line_spans.push(Span::styled(
-            format!(" → autocomplete: {}{}", models_input.split(',').last().unwrap_or("").trim(), sug),
-            Style::default().fg(COLOR_YELLOW_ACCENT).add_modifier(Modifier::ITALIC),
-        ));
-    }
+    let f0_style = if active_field == 0 {
+        Style::default().fg(Color::Black).bg(COLOR_BRIGHT_RED)
+    } else {
+        Style::default().fg(COLOR_TEXT_MAIN)
+    };
+    let f1_style = if active_field == 1 {
+        Style::default().fg(Color::Black).bg(COLOR_YELLOW_ACCENT)
+    } else {
+        Style::default().fg(COLOR_YELLOW_ACCENT)
+    };
+    let f2_style = if active_field == 2 {
+        Style::default().fg(Color::Black).bg(COLOR_CYAN_ACCENT)
+    } else {
+        Style::default().fg(COLOR_CYAN_ACCENT)
+    };
+    let f3_style = if active_field == 3 {
+        Style::default().fg(Color::Black).bg(COLOR_MAGENTA_PROXY)
+    } else {
+        Style::default().fg(COLOR_MAGENTA_PROXY)
+    };
+
+    let models_summary = if models.is_empty() {
+        "antigravity/claude-sonnet-4-6 (Default)".to_string()
+    } else {
+        format!("{} models selected ({})", models.len(), models.join(", "))
+    };
 
     let text = vec![
-        Line::styled(
-            title,
-            Style::default()
-                .fg(COLOR_YELLOW_ACCENT)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Line::styled(title, Style::default().fg(COLOR_BRIGHT_RED).add_modifier(Modifier::BOLD)),
         Line::raw(""),
         Line::from(vec![
-            Span::styled(
-                "1. Combo Name:     ",
-                Style::default().fg(if active_field == 0 {
-                    COLOR_CYAN_ACCENT
-                } else {
-                    COLOR_TEXT_MUTED
-                }),
-            ),
-            Span::styled(
-                format!(
-                    "[ {} ]",
-                    if name.is_empty() {
-                        "type combo name..."
-                    } else {
-                        name
-                    }
-                ),
-                Style::default().fg(COLOR_TEXT_MAIN),
-            ),
+            Span::styled(" 1. Combo Name:    ", Style::default().fg(COLOR_TEXT_MUTED)),
+            Span::styled(if name.is_empty() { "smart-routing" } else { name }, f0_style),
+        ]),
+        Line::from(vec![
+            Span::styled(" 2. Strategy:      ", Style::default().fg(COLOR_TEXT_MUTED)),
+            Span::styled(format!("◀ {} ▶", strat.0), f1_style),
+            Span::styled(format!(" ({})", strat.1), Style::default().fg(COLOR_TEXT_MUTED)),
+        ]),
+        Line::from(vec![
+            Span::styled(" 3. Models List:   ", Style::default().fg(COLOR_TEXT_MUTED)),
+            Span::styled(format!("[ {} ]", models_summary), f2_style),
+            Span::styled("  [Press Space / Enter to pick models]", Style::default().fg(COLOR_YELLOW_ACCENT)),
+        ]),
+        Line::from(vec![
+            Span::styled(" 4. Assign Proxy:  ", Style::default().fg(COLOR_TEXT_MUTED)),
+            Span::styled(format!("◀ {} ▶", proxy_name), f3_style),
         ]),
         Line::raw(""),
+        Line::styled("─── Navigation ───", Style::default().fg(COLOR_DARK_RED)),
         Line::from(vec![
-            Span::styled(
-                "2. Strategy [←/→]: ",
-                Style::default().fg(if active_field == 1 {
-                    COLOR_CYAN_ACCENT
-                } else {
-                    COLOR_TEXT_MUTED
-                }),
-            ),
-            Span::styled(
-                format!("< {} >", strat_name),
-                Style::default()
-                    .fg(COLOR_GREEN_STATUS)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(" [Tab/↓/↑] ", Style::default().fg(COLOR_YELLOW_ACCENT)),
+            Span::raw("Switch Fields   "),
+            Span::styled(" [←/→] ", Style::default().fg(COLOR_YELLOW_ACCENT)),
+            Span::raw("Change Strategy/Proxy   "),
+            Span::styled(" [Enter/Space on field 3] ", Style::default().fg(COLOR_CYAN_ACCENT)),
+            Span::raw("Open Searchable Model Picker"),
         ]),
-        Line::styled(
-            format!("   Description: {}", strat_desc),
-            Style::default().fg(COLOR_TEXT_MUTED),
-        ),
-        Line::raw(""),
-        Line::from(model_line_spans),
-        Line::raw(""),
-        Line::styled(
-            "─────────────────────────────────────────────────────────────────",
-            Style::default().fg(COLOR_MUTED_BORDER),
-        ),
         Line::from(vec![
-            Span::styled(
-                " [Tab] ",
-                Style::default().fg(Color::Black).bg(Color::White),
-            ),
-            Span::raw(" Next Field   "),
-            Span::styled(
-                " [→/Tab on match] ",
-                Style::default().fg(Color::Black).bg(COLOR_YELLOW_ACCENT),
-            ),
-            Span::raw(" Autocomplete   "),
-            Span::styled(
-                " [Enter] ",
-                Style::default().fg(Color::Black).bg(COLOR_GREEN_STATUS),
-            ),
+            Span::styled(" [Enter] ", Style::default().fg(Color::Black).bg(COLOR_GREEN_STATUS)),
             Span::raw(" Save Combo   "),
             Span::styled(" [Esc] ", Style::default().fg(Color::Black).bg(COLOR_BRIGHT_RED)),
             Span::raw(" Cancel "),
         ]),
     ];
 
-    let block = Block::default()
-        .title(" Combo Studio ")
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(COLOR_YELLOW_ACCENT))
-        .padding(ratatui::widgets::Padding::uniform(1));
+    let modal_block = Paragraph::new(text)
+        .block(
+            Block::default()
+                .title(Span::styled(" 🔀 Combo Configuration ", Style::default().fg(COLOR_BRIGHT_RED)))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Double)
+                .border_style(Style::default().fg(COLOR_BRIGHT_RED)),
+        )
+        .alignment(Alignment::Left);
 
-    frame.render_widget(Paragraph::new(text).block(block), popup_area);
+    frame.render_widget(modal_block, popup_area);
 }
 
-fn render_proxy_form_modal(
+// ─── Searchable Model Picker Modal ───────────────────────────────────────────
+fn render_model_picker_modal(
+    frame: &mut Frame,
+    area: Rect,
+    search_query: &str,
+    selected_models: &[String],
+    cursor_idx: usize,
+) {
+    let popup_area = centered_rect(80, 75, area);
+    frame.render_widget(Clear, popup_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Search box
+            Constraint::Min(10),   // Filtered list
+            Constraint::Length(2), // Controls
+        ])
+        .split(popup_area);
+
+    let search_bar = Paragraph::new(Line::from(vec![
+        Span::styled(" 🔍 Search Models: ", Style::default().fg(COLOR_YELLOW_ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            if search_query.is_empty() {
+                "Type model name or vendor (e.g. claude, deepseek, gemini)..."
+            } else {
+                search_query
+            },
+            if search_query.is_empty() {
+                Style::default().fg(COLOR_BORDER_INACTIVE)
+            } else {
+                Style::default().fg(COLOR_TEXT_MAIN).add_modifier(Modifier::BOLD)
+            },
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(COLOR_BRIGHT_RED)),
+    );
+    frame.render_widget(search_bar, chunks[0]);
+
+    let query_lower = search_query.to_lowercase();
+    let filtered_models: Vec<(&str, &str)> = KNOWN_MODELS
+        .iter()
+        .filter(|(m, desc)| {
+            if query_lower.is_empty() {
+                true
+            } else {
+                m.to_lowercase().contains(&query_lower) || desc.to_lowercase().contains(&query_lower)
+            }
+        })
+        .copied()
+        .collect();
+
+    let items: Vec<ListItem> = filtered_models
+        .iter()
+        .enumerate()
+        .map(|(i, (model_id, desc))| {
+            let is_selected = selected_models.contains(&model_id.to_string());
+            let is_cursor = i == cursor_idx;
+
+            let check_box = if is_selected {
+                Span::styled("[✓] ", Style::default().fg(COLOR_GREEN_STATUS).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled("[ ] ", Style::default().fg(COLOR_BORDER_INACTIVE))
+            };
+
+            let row_style = if is_cursor {
+                Style::default().fg(Color::Black).bg(COLOR_CYAN_ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(COLOR_TEXT_MAIN)
+            };
+
+            ListItem::new(Line::from(vec![
+                check_box,
+                Span::styled(format!("{:<38} ", model_id), row_style),
+                Span::styled(format!("({})", desc), Style::default().fg(COLOR_TEXT_MUTED)),
+            ]))
+        })
+        .collect();
+
+    let models_list = List::new(items).block(
+        Block::default()
+            .title(Span::styled(
+                format!(" 📋 Available Models ({} matches) ", filtered_models.len()),
+                Style::default().fg(COLOR_BRIGHT_RED),
+            ))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(COLOR_DARK_RED)),
+    );
+    frame.render_widget(models_list, chunks[1]);
+
+    let controls = Paragraph::new(Line::from(vec![
+        Span::styled(" [↑/↓] ", Style::default().fg(COLOR_YELLOW_ACCENT)),
+        Span::raw("Navigate   "),
+        Span::styled(" [Space] ", Style::default().fg(Color::Black).bg(COLOR_CYAN_ACCENT)),
+        Span::raw(" Toggle Select   "),
+        Span::styled(" [Enter] ", Style::default().fg(Color::Black).bg(COLOR_GREEN_STATUS)),
+        Span::raw(" Confirm Selection   "),
+        Span::styled(" [Esc] ", Style::default().fg(Color::Black).bg(COLOR_BRIGHT_RED)),
+        Span::raw(" Back "),
+    ]))
+    .alignment(Alignment::Center);
+
+    frame.render_widget(controls, chunks[2]);
+}
+
+// ─── Provider Modal ───────────────────────────────────────────────────────────
+fn render_provider_modal(
+    frame: &mut Frame,
+    area: Rect,
+    provider_type_idx: usize,
+    name: &str,
+    api_key: &str,
+    priority: usize,
+    active_field: usize,
+) {
+    let popup_area = centered_rect(70, 55, area);
+    frame.render_widget(Clear, popup_area);
+
+    let ptype = PROVIDER_TYPES[provider_type_idx % PROVIDER_TYPES.len()];
+
+    let f0_style = if active_field == 0 {
+        Style::default().fg(Color::Black).bg(COLOR_CYAN_ACCENT)
+    } else {
+        Style::default().fg(COLOR_CYAN_ACCENT)
+    };
+    let f1_style = if active_field == 1 {
+        Style::default().fg(Color::Black).bg(COLOR_BRIGHT_RED)
+    } else {
+        Style::default().fg(COLOR_TEXT_MAIN)
+    };
+    let f2_style = if active_field == 2 {
+        Style::default().fg(Color::Black).bg(COLOR_YELLOW_ACCENT)
+    } else {
+        Style::default().fg(COLOR_YELLOW_ACCENT)
+    };
+    let f3_style = if active_field == 3 {
+        Style::default().fg(Color::Black).bg(COLOR_GREEN_STATUS)
+    } else {
+        Style::default().fg(COLOR_GREEN_STATUS)
+    };
+
+    let masked_key = if api_key.is_empty() {
+        "sk-...".to_string()
+    } else if api_key.len() > 8 {
+        format!("{}****{}", &api_key[..4], &api_key[api_key.len() - 4..])
+    } else {
+        "****".to_string()
+    };
+
+    let text = vec![
+        Line::styled("Add New Provider Connection", Style::default().fg(COLOR_BRIGHT_RED).add_modifier(Modifier::BOLD)),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(" 1. Provider Type: ", Style::default().fg(COLOR_TEXT_MUTED)),
+            Span::styled(format!("◀ {} ▶", ptype.0), f0_style),
+            Span::styled(format!(" ({})", ptype.1), Style::default().fg(COLOR_TEXT_MUTED)),
+        ]),
+        Line::from(vec![
+            Span::styled(" 2. Connection Name: ", Style::default().fg(COLOR_TEXT_MUTED)),
+            Span::styled(if name.is_empty() { "Main Account" } else { name }, f1_style),
+        ]),
+        Line::from(vec![
+            Span::styled(" 3. API Key / Secret: ", Style::default().fg(COLOR_TEXT_MUTED)),
+            Span::styled(masked_key, f2_style),
+        ]),
+        Line::from(vec![
+            Span::styled(" 4. Priority Level:   ", Style::default().fg(COLOR_TEXT_MUTED)),
+            Span::styled(format!("◀ P{} ▶", priority + 1), f3_style),
+        ]),
+        Line::raw(""),
+        Line::styled("─── Instructions ───", Style::default().fg(COLOR_DARK_RED)),
+        Line::from(vec![
+            Span::styled(" [Tab/↓/↑] ", Style::default().fg(COLOR_YELLOW_ACCENT)),
+            Span::raw("Switch Fields   "),
+            Span::styled(" [←/→] ", Style::default().fg(COLOR_YELLOW_ACCENT)),
+            Span::raw("Change Type/Priority"),
+        ]),
+        Line::from(vec![
+            Span::styled(" [Enter] ", Style::default().fg(Color::Black).bg(COLOR_GREEN_STATUS)),
+            Span::raw(" Save Connection   "),
+            Span::styled(" [Esc] ", Style::default().fg(Color::Black).bg(COLOR_BRIGHT_RED)),
+            Span::raw(" Cancel "),
+        ]),
+    ];
+
+    let modal_block = Paragraph::new(text)
+        .block(
+            Block::default()
+                .title(Span::styled(" 👥 Add Provider ", Style::default().fg(COLOR_BRIGHT_RED)))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Double)
+                .border_style(Style::default().fg(COLOR_BRIGHT_RED)),
+        )
+        .alignment(Alignment::Left);
+
+    frame.render_widget(modal_block, popup_area);
+}
+
+// ─── Proxy Modal (Add & Edit) ─────────────────────────────────────────────────
+fn render_proxy_modal(
     frame: &mut Frame,
     area: Rect,
     title: &str,
@@ -939,114 +1272,79 @@ fn render_proxy_form_modal(
     port: &str,
     active_field: usize,
 ) {
-    let popup_area = centered_rect(62, 52, area);
+    let popup_area = centered_rect(65, 50, area);
     frame.render_widget(Clear, popup_area);
 
     let protocols = ["socks5h", "socks5", "http", "https"];
     let proto = protocols[protocol_idx % protocols.len()];
 
+    let f0_style = if active_field == 0 {
+        Style::default().fg(Color::Black).bg(COLOR_BRIGHT_RED)
+    } else {
+        Style::default().fg(COLOR_TEXT_MAIN)
+    };
+    let f1_style = if active_field == 1 {
+        Style::default().fg(Color::Black).bg(COLOR_MAGENTA_PROXY)
+    } else {
+        Style::default().fg(COLOR_MAGENTA_PROXY)
+    };
+    let f2_style = if active_field == 2 {
+        Style::default().fg(Color::Black).bg(COLOR_CYAN_ACCENT)
+    } else {
+        Style::default().fg(COLOR_CYAN_ACCENT)
+    };
+    let f3_style = if active_field == 3 {
+        Style::default().fg(Color::Black).bg(COLOR_YELLOW_ACCENT)
+    } else {
+        Style::default().fg(COLOR_YELLOW_ACCENT)
+    };
+
     let text = vec![
-        Line::styled(
-            title,
-            Style::default()
-                .fg(COLOR_MAGENTA_PROXY)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Line::styled(title, Style::default().fg(COLOR_BRIGHT_RED).add_modifier(Modifier::BOLD)),
         Line::raw(""),
         Line::from(vec![
-            Span::styled(
-                "1. Proxy Name:     ",
-                Style::default().fg(if active_field == 0 {
-                    COLOR_CYAN_ACCENT
-                } else {
-                    COLOR_TEXT_MUTED
-                }),
-            ),
-            Span::styled(
-                format!(
-                    "[ {} ]",
-                    if name.is_empty() {
-                        "e.g. Fast SOCKS"
-                    } else {
-                        name
-                    }
-                ),
-                Style::default().fg(COLOR_TEXT_MAIN),
-            ),
+            Span::styled(" 1. Proxy Name:   ", Style::default().fg(COLOR_TEXT_MUTED)),
+            Span::styled(if name.is_empty() { "Local SOCKS5" } else { name }, f0_style),
         ]),
         Line::from(vec![
-            Span::styled(
-                "2. Protocol [←/→]: ",
-                Style::default().fg(if active_field == 1 {
-                    COLOR_CYAN_ACCENT
-                } else {
-                    COLOR_TEXT_MUTED
-                }),
-            ),
-            Span::styled(
-                format!("< {} >", proto.to_uppercase()),
-                Style::default()
-                    .fg(COLOR_GREEN_STATUS)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(" 2. Protocol:     ", Style::default().fg(COLOR_TEXT_MUTED)),
+            Span::styled(format!("◀ {} ▶", proto), f1_style),
         ]),
         Line::from(vec![
-            Span::styled(
-                "3. Host / IP:      ",
-                Style::default().fg(if active_field == 2 {
-                    COLOR_CYAN_ACCENT
-                } else {
-                    COLOR_TEXT_MUTED
-                }),
-            ),
-            Span::styled(
-                format!("[ {} ]", if host.is_empty() { "127.0.0.1" } else { host }),
-                Style::default().fg(COLOR_TEXT_MAIN),
-            ),
+            Span::styled(" 3. Host IP / FQDN: ", Style::default().fg(COLOR_TEXT_MUTED)),
+            Span::styled(if host.is_empty() { "127.0.0.1" } else { host }, f2_style),
         ]),
         Line::from(vec![
-            Span::styled(
-                "4. Port:           ",
-                Style::default().fg(if active_field == 3 {
-                    COLOR_CYAN_ACCENT
-                } else {
-                    COLOR_TEXT_MUTED
-                }),
-            ),
-            Span::styled(
-                format!("[ {} ]", if port.is_empty() { "1080" } else { port }),
-                Style::default().fg(COLOR_TEXT_MAIN),
-            ),
+            Span::styled(" 4. Port:         ", Style::default().fg(COLOR_TEXT_MUTED)),
+            Span::styled(if port.is_empty() { "1080" } else { port }, f3_style),
         ]),
         Line::raw(""),
-        Line::styled(
-            "─────────────────────────────────────────────────────────────",
-            Style::default().fg(COLOR_MUTED_BORDER),
-        ),
+        Line::styled("─── Navigation ───", Style::default().fg(COLOR_DARK_RED)),
         Line::from(vec![
-            Span::styled(
-                " [Tab] ",
-                Style::default().fg(Color::Black).bg(Color::White),
-            ),
-            Span::raw(" Next Field   "),
-            Span::styled(
-                " [Enter] ",
-                Style::default().fg(Color::Black).bg(COLOR_GREEN_STATUS),
-            ),
+            Span::styled(" [Tab/↓/↑] ", Style::default().fg(COLOR_YELLOW_ACCENT)),
+            Span::raw("Switch Fields   "),
+            Span::styled(" [←/→] ", Style::default().fg(COLOR_YELLOW_ACCENT)),
+            Span::raw("Change Protocol"),
+        ]),
+        Line::from(vec![
+            Span::styled(" [Enter] ", Style::default().fg(Color::Black).bg(COLOR_GREEN_STATUS)),
             Span::raw(" Save Proxy   "),
             Span::styled(" [Esc] ", Style::default().fg(Color::Black).bg(COLOR_BRIGHT_RED)),
             Span::raw(" Cancel "),
         ]),
     ];
 
-    let block = Block::default()
-        .title(" Egress Proxy Settings ")
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(COLOR_MAGENTA_PROXY))
-        .padding(ratatui::widgets::Padding::uniform(1));
+    let modal_block = Paragraph::new(text)
+        .block(
+            Block::default()
+                .title(Span::styled(" 🌐 Proxy Setup ", Style::default().fg(COLOR_BRIGHT_RED)))
+                .borders(Borders::ALL)
+                .border_type(BorderType::Double)
+                .border_style(Style::default().fg(COLOR_BRIGHT_RED)),
+        )
+        .alignment(Alignment::Left);
 
-    frame.render_widget(Paragraph::new(text).block(block), popup_area);
+    frame.render_widget(modal_block, popup_area);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
