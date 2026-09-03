@@ -1,0 +1,229 @@
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
+    routing::{get, post},
+    Json, Router,
+};
+use clap::Parser;
+use futures_util::StreamExt;
+use oxiroute_auth::AntigravityAuthManager;
+use oxiroute_core::ChatRequest;
+use oxiroute_engine::Engine;
+use std::convert::Infallible;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+#[derive(Parser, Debug)]
+#[command(name = "oxiroute", about = "Fast, lightweight AI gateway & LLM router in pure Rust")]
+struct Args {
+    #[arg(short, long, default_value_t = 20200)]
+    port: u16,
+
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+
+    #[arg(long, env = "OXI_PROXY")]
+    proxy: Option<String>,
+
+    #[arg(long, env = "OXI_DB_PATH", default_value = "/home/omid/.omniroute/storage.sqlite")]
+    omniroute_db: String,
+
+    #[arg(long, env = "OXI_ENV_PATH", default_value = "/home/omid/.omniroute/.env")]
+    omniroute_env: String,
+}
+
+#[derive(Clone)]
+struct AppState {
+    engine: Arc<Engine>,
+    antigravity_auth: Arc<AntigravityAuthManager>,
+}
+
+async fn health_check() -> &'static str {
+    "Oxiroute is running healthy! 🦀"
+}
+
+async fn list_models() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "object": "list",
+        "data": [
+            {
+                "id": "antigravity/claude-sonnet-4-6",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "antigravity"
+            },
+            {
+                "id": "antigravity/claude-opus-4-6-thinking",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "antigravity"
+            },
+            {
+                "id": "antigravity/gemini-3.7-flash-low",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "antigravity"
+            },
+            {
+                "id": "antigravity/gemini-2.5-flash",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "antigravity"
+            },
+            {
+                "id": "claude-sonnet-4-6",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "antigravity"
+            },
+            {
+                "id": "gemini-2.5-flash",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "antigravity"
+            }
+        ]
+    }))
+}
+
+async fn chat_completions(
+    State(state): State<AppState>,
+    Json(request): Json<ChatRequest>,
+) -> Response {
+    let model_name = request.model.clone();
+    tracing::info!("Handling chat request for model: {}", model_name);
+
+    let executor = match state.engine.antigravity() {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "Provider executor not initialized",
+                        "type": "internal_error"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let account = match state.antigravity_auth.get_account() {
+        Some(a) => a,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": "No active provider connection available",
+                        "type": "auth_error"
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    tracing::info!(
+        "Routing model '{}' to account: {}",
+        model_name,
+        account.email
+    );
+
+    match executor.execute_stream(&request, &model_name, &account).await {
+        Ok(stream) => {
+            let sse_stream = stream.map(|res| match res {
+                Ok(chunk) => {
+                    let json_str = serde_json::to_string(&chunk).unwrap_or_default();
+                    Ok::<Event, Infallible>(Event::default().data(json_str))
+                }
+                Err(e) => {
+                    let err_json = serde_json::json!({
+                        "error": {
+                            "message": e.to_string(),
+                            "type": "provider_error"
+                        }
+                    });
+                    Ok::<Event, Infallible>(Event::default().data(err_json.to_string()))
+                }
+            });
+
+            let done_stream = futures_util::stream::once(async {
+                Ok::<Event, Infallible>(Event::default().data("[DONE]"))
+            });
+
+            let combined_stream = sse_stream.chain(done_stream);
+
+            Sse::new(combined_stream)
+                .keep_alive(KeepAlive::default())
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("Execution error: {}", e);
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": e.to_string(),
+                        "type": "provider_error"
+                    }
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    let args = Args::parse();
+    let addr: SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
+
+    tracing::info!("Initializing Oxiroute on port {}...", args.port);
+    if let Some(ref p) = args.proxy {
+        tracing::info!("Using configured egress proxy: {}", p);
+    }
+
+    let auth_mgr = AntigravityAuthManager::load_from_omniroute_sqlite(
+        &args.omniroute_db,
+        &args.omniroute_env,
+    )?;
+
+    let engine = Engine::new(args.proxy.as_deref());
+
+    let state = AppState {
+        engine: Arc::new(engine),
+        antigravity_auth: Arc::new(auth_mgr),
+    };
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    let app = Router::new()
+        .route("/health", get(health_check))
+        .route("/v1/models", get(list_models))
+        .route("/v1/chat/completions", post(chat_completions))
+        .layer(cors)
+        .with_state(state);
+
+    tracing::info!("🦀 Oxiroute listening on http://{}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}

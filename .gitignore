@@ -1,0 +1,29 @@
+# Rust / Cargo
+/target
+Cargo.lock
+
+# Environment & Secrets
+.env
+.env.*
+*.env
+secrets.*
+secrets/
+
+# Databases & Local state
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+data/
+storage/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+logs/
+*.log
