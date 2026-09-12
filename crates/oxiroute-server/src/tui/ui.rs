@@ -12,20 +12,36 @@ use ratatui::{
 };
 use std::sync::atomic::Ordering;
 
-// ─── Theme Colors ─────────────────────────────────────────────────────────────
-const COLOR_CRIMSON: Color = Color::Rgb(220, 38, 38);
-const COLOR_BRIGHT_RED: Color = Color::Rgb(255, 65, 75);
-const COLOR_DARK_RED: Color = Color::Rgb(153, 27, 27);
-const COLOR_TEXT_MAIN: Color = Color::Rgb(245, 245, 250);
-const COLOR_TEXT_MUTED: Color = Color::Rgb(150, 150, 165);
+fn format_number(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    let chars: Vec<char> = s.chars().rev().collect();
+    for (i, c) in chars.iter().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(*c);
+    }
+    result.chars().rev().collect()
+}
+const COLOR_OLED_BLACK: Color = Color::Rgb(0, 0, 0);
+const COLOR_CRIMSON: Color = Color::Rgb(225, 29, 72); // Glowing Rose/Crimson
+const COLOR_BRIGHT_RED: Color = Color::Rgb(244, 63, 94); // Neon Vibrant Red
+const COLOR_DARK_RED: Color = Color::Rgb(159, 18, 57); // Deep Crimson Border
+const COLOR_TEXT_MAIN: Color = Color::Rgb(255, 255, 255);
+const COLOR_TEXT_MUTED: Color = Color::Rgb(161, 161, 170);
 const COLOR_GREEN_STATUS: Color = Color::Rgb(52, 211, 153);
 const COLOR_CYAN_ACCENT: Color = Color::Rgb(56, 189, 248);
 const COLOR_YELLOW_ACCENT: Color = Color::Rgb(251, 191, 36);
-const COLOR_MAGENTA_PROXY: Color = Color::Rgb(192, 132, 252);
-const COLOR_BORDER_INACTIVE: Color = Color::Rgb(65, 65, 80);
+const COLOR_MAGENTA_PROXY: Color = Color::Rgb(217, 70, 239);
+const COLOR_BORDER_INACTIVE: Color = Color::Rgb(39, 39, 42);
 
 pub fn render(frame: &mut Frame, state: &TuiState) {
     let size = frame.area();
+
+    // Render deep OLED black background
+    let bg_block = Block::default().style(Style::default().bg(COLOR_OLED_BLACK));
+    frame.render_widget(bg_block, size);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -144,6 +160,24 @@ pub fn render(frame: &mut Frame, state: &TuiState) {
         } => render_provider_modal(
             frame,
             size,
+            "Add New Provider Connection",
+            provider_type_idx,
+            &name,
+            &api_key,
+            priority,
+            active_field,
+        ),
+        ModalState::EditProvider {
+            provider_type_idx,
+            name,
+            api_key,
+            priority,
+            active_field,
+            ..
+        } => render_provider_modal(
+            frame,
+            size,
+            "Edit Provider Connection",
             provider_type_idx,
             &name,
             &api_key,
@@ -378,7 +412,9 @@ fn render_overview_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
 
     let total_reqs = state.total_requests.load(Ordering::Relaxed);
     let active_reqs = state.active_requests.load(Ordering::Relaxed);
-    let tokens = state.total_tokens.load(Ordering::Relaxed);
+    let session_tokens = state.total_tokens.load(Ordering::Relaxed);
+    let historical_tokens = state.historical_burned_tokens.load(Ordering::Relaxed);
+    let all_time_tokens = historical_tokens + session_tokens;
 
     let active_color = if active_reqs > 0 {
         COLOR_YELLOW_ACCENT
@@ -395,6 +431,7 @@ fn render_overview_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
                     .fg(COLOR_TEXT_MAIN)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled(" (Session)", Style::default().fg(COLOR_TEXT_MUTED)),
         ]),
         Line::from(vec![
             Span::styled("Active Streams:     ", Style::default().fg(COLOR_TEXT_MUTED)),
@@ -404,16 +441,20 @@ fn render_overview_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
             ),
         ]),
         Line::from(vec![
-            Span::styled("Tokens Streamed:    ", Style::default().fg(COLOR_TEXT_MUTED)),
+            Span::styled("Burned Tokens:      ", Style::default().fg(COLOR_TEXT_MUTED)),
             Span::styled(
-                format!("{}", tokens),
+                format_number(all_time_tokens),
                 Style::default()
                     .fg(COLOR_CYAN_ACCENT)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled(
+                format!(" (Session: {})", format_number(session_tokens)),
+                Style::default().fg(COLOR_TEXT_MUTED),
+            ),
         ]),
         Line::from(vec![
-            Span::styled("Prompt Compaction:  ", Style::default().fg(COLOR_TEXT_MUTED)),
+            Span::styled("Prompt Compactor:   ", Style::default().fg(COLOR_TEXT_MUTED)),
             Span::styled(
                 "RTK + Caveman Active (-25% avg)",
                 Style::default().fg(COLOR_GREEN_STATUS),
@@ -519,12 +560,18 @@ fn render_combos_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
             };
 
             let prefix = if is_selected { " ▶ " } else { "   " };
+            let status_suffix = if let Some(ref st) = combo.status_text {
+                format!(" - {}", st)
+            } else {
+                String::new()
+            };
             ListItem::new(format!(
-                "{}{} [{}] ({} models)",
+                "{}{} [{}] ({} models){}",
                 prefix,
                 combo.name,
                 combo.strategy,
-                combo.models.len()
+                combo.models.len(),
+                status_suffix
             ))
             .style(style)
         })
@@ -533,7 +580,7 @@ fn render_combos_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
     let combos_list = List::new(items).block(
         Block::default()
             .title(Span::styled(
-                " 🔀 Active Combos [a: Add | e: Edit | d: Delete] ",
+                " 🔀 Active Combos [t: Test Combo | Enter/e: Edit | a: Add | d: Delete] ",
                 Style::default().fg(COLOR_BRIGHT_RED),
             ))
             .borders(Borders::ALL)
@@ -694,7 +741,7 @@ fn render_providers_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
     .block(
         Block::default()
             .title(Span::styled(
-                " 👥 Provider Connections [a: Add | t: Test Connection | r: Refresh Token | d: Delete] ",
+                " 👥 Provider Connections [Enter/e: Edit | a: Add | Space: Toggle | t: Test | r: Refresh | d: Delete] ",
                 Style::default().fg(COLOR_BRIGHT_RED),
             ))
             .borders(Borders::ALL)
@@ -766,7 +813,7 @@ fn render_proxies_tab(frame: &mut Frame, area: Rect, state: &TuiState) {
     .block(
         Block::default()
             .title(Span::styled(
-                " 🌐 Proxy Pool [a: Add Proxy | e: Edit | d: Delete] ",
+                " 🌐 Proxy Pool [Enter/e: Edit | a: Add | d: Delete] ",
                 Style::default().fg(COLOR_BRIGHT_RED),
             ))
             .borders(Borders::ALL)
@@ -1172,13 +1219,14 @@ fn render_model_picker_modal(
 fn render_provider_modal(
     frame: &mut Frame,
     area: Rect,
+    title: &str,
     provider_type_idx: usize,
     name: &str,
     api_key: &str,
     priority: usize,
     active_field: usize,
 ) {
-    let popup_area = centered_rect(70, 55, area);
+    let popup_area = centered_rect(65, 50, area);
     frame.render_widget(Clear, popup_area);
 
     let ptype = PROVIDER_TYPES[provider_type_idx % PROVIDER_TYPES.len()];
@@ -1205,7 +1253,7 @@ fn render_provider_modal(
     };
 
     let masked_key = if api_key.is_empty() {
-        "sk-...".to_string()
+        "sk-... (or unchanged)".to_string()
     } else if api_key.len() > 8 {
         format!("{}****{}", &api_key[..4], &api_key[api_key.len() - 4..])
     } else {
@@ -1213,7 +1261,7 @@ fn render_provider_modal(
     };
 
     let text = vec![
-        Line::styled("Add New Provider Connection", Style::default().fg(COLOR_BRIGHT_RED).add_modifier(Modifier::BOLD)),
+        Line::styled(title, Style::default().fg(COLOR_BRIGHT_RED).add_modifier(Modifier::BOLD)),
         Line::raw(""),
         Line::from(vec![
             Span::styled(" 1. Provider Type: ", Style::default().fg(COLOR_TEXT_MUTED)),
@@ -1251,7 +1299,7 @@ fn render_provider_modal(
     let modal_block = Paragraph::new(text)
         .block(
             Block::default()
-                .title(Span::styled(" 👥 Add Provider ", Style::default().fg(COLOR_BRIGHT_RED)))
+                .title(Span::styled(format!(" 👥 {} ", title), Style::default().fg(COLOR_BRIGHT_RED)))
                 .borders(Borders::ALL)
                 .border_type(BorderType::Double)
                 .border_style(Style::default().fg(COLOR_BRIGHT_RED)),

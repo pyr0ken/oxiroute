@@ -44,13 +44,21 @@ pub const KNOWN_MODELS: &[(&str, &str)] = &[
 ];
 
 pub const PROVIDER_TYPES: &[(&str, &str)] = &[
+    ("antigravity", "Google Antigravity OAuth (Cloud Code IDE)"),
+    ("agy", "Google Antigravity CLI OAuth (agy)"),
     ("openrouter", "OpenRouter Aggregator API (openrouter.ai)"),
+    ("opencode", "OpenCode API Key (opencode.ai)"),
+    ("opencode-zen", "OpenCode Zen Free Models API"),
+    ("deepseek-web", "DeepSeek Web Session Key"),
+    ("qwen-web", "Qwen Web Session Key"),
+    ("tokenrouter", "TokenRouter Aggregator API"),
     ("deepseek", "DeepSeek Platform API (api.deepseek.com)"),
     ("groq", "Groq Ultra-Fast LPU (api.groq.com)"),
     ("openai", "OpenAI Official API (api.openai.com)"),
     ("anthropic", "Anthropic Official API (api.anthropic.com)"),
     ("google", "Google Gemini API (generativelanguage.googleapis.com)"),
     ("kiro", "Kiro Gateway API"),
+    ("bai", "BAI / Free Provider Endpoint"),
     ("custom", "Custom OpenAI-compatible Endpoint"),
 ];
 
@@ -136,6 +144,14 @@ pub enum ModalState {
         priority: usize,
         active_field: usize,
     },
+    EditProvider {
+        account_id: String,
+        provider_type_idx: usize,
+        name: String,
+        api_key: String,
+        priority: usize,
+        active_field: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +161,7 @@ pub struct ComboDisplay {
     pub strategy: String,
     pub models: Vec<String>,
     pub proxy_name: Option<String>,
+    pub status_text: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,12 +206,14 @@ pub struct LogEntry {
 pub struct TuiState {
     pub port: u16,
     pub proxy: Option<String>,
+    pub storage: Option<std::sync::Arc<oxiroute_auth::StorageManager>>,
     pub active_tab: RwLock<ActiveTab>,
     pub selected_index: RwLock<usize>,
     pub modal: RwLock<ModalState>,
     pub total_requests: AtomicU64,
     pub active_requests: AtomicU64,
     pub total_tokens: AtomicU64,
+    pub historical_burned_tokens: AtomicU64,
     pub start_time: Instant,
     pub logs: RwLock<VecDeque<LogEntry>>,
     pub combos: RwLock<Vec<ComboDisplay>>,
@@ -205,16 +224,22 @@ pub struct TuiState {
 }
 
 impl TuiState {
-    pub fn new(port: u16, proxy: Option<String>) -> Self {
+    pub fn new(
+        port: u16,
+        proxy: Option<String>,
+        storage: Option<std::sync::Arc<oxiroute_auth::StorageManager>>,
+    ) -> Self {
         Self {
             port,
             proxy,
+            storage,
             active_tab: RwLock::new(ActiveTab::Overview),
             selected_index: RwLock::new(0),
             modal: RwLock::new(ModalState::None),
             total_requests: AtomicU64::new(0),
             active_requests: AtomicU64::new(0),
             total_tokens: AtomicU64::new(0),
+            historical_burned_tokens: AtomicU64::new(0),
             start_time: Instant::now(),
             logs: RwLock::new(VecDeque::with_capacity(150)),
             combos: RwLock::new(Vec::new()),
@@ -223,6 +248,10 @@ impl TuiState {
             timeline: RwLock::new(VecDeque::with_capacity(50)),
             recent_latencies: RwLock::new(Vec::new()),
         }
+    }
+
+    pub fn set_historical_burned_tokens(&self, tokens: u64) {
+        self.historical_burned_tokens.store(tokens, Ordering::Relaxed);
     }
 
     pub fn set_accounts(&self, accs: Vec<AccountDisplay>) {
@@ -307,6 +336,34 @@ impl TuiState {
             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
             model: model.to_string(),
             account: account.to_string(),
+            tokens,
+            latency_ms,
+            status_code,
+        };
+
+        if let Ok(mut tl) = self.timeline.write() {
+            if tl.len() >= 50 {
+                tl.pop_front();
+            }
+            tl.push_back(item);
+        }
+    }
+
+    pub fn record_historical_timeline_item(
+        &self,
+        id: String,
+        timestamp: String,
+        model: String,
+        account: String,
+        tokens: u64,
+        latency_ms: u64,
+        status_code: u16,
+    ) {
+        let item = TimelineItem {
+            id,
+            timestamp,
+            model,
+            account,
             tokens,
             latency_ms,
             status_code,

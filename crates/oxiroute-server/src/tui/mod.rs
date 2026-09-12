@@ -110,7 +110,7 @@ pub fn run_tui(
                                 _ => {}
                             }
                         }
-                        KeyCode::Char('e') => {
+                        KeyCode::Enter | KeyCode::Char('e') => {
                             let tab = *state.active_tab.read().unwrap();
                             let sel_idx = *state.selected_index.read().unwrap();
                             match tab {
@@ -143,6 +143,25 @@ pub fn run_tui(
                                         });
                                     }
                                 }
+                                ActiveTab::Providers => {
+                                    let accounts_guard = state.accounts.read().unwrap();
+                                    if let Some(acc) = accounts_guard.get(sel_idx) {
+                                        let p_idx = PROVIDER_TYPES
+                                            .iter()
+                                            .position(|(p, _)| *p == acc.provider)
+                                            .unwrap_or(0);
+                                        let prio = (acc.priority.saturating_sub(1)) as usize % 3;
+
+                                        state.open_modal(ModalState::EditProvider {
+                                            account_id: acc.id.clone(),
+                                            provider_type_idx: p_idx,
+                                            name: acc.name.clone(),
+                                            api_key: String::new(),
+                                            priority: prio,
+                                            active_field: 0,
+                                        });
+                                    }
+                                }
                                 ActiveTab::Proxies => {
                                     let proxies_guard = state.proxies.read().unwrap();
                                     if let Some(proxy) = proxies_guard.get(sel_idx) {
@@ -166,32 +185,131 @@ pub fn run_tui(
                         }
                         KeyCode::Char('t') => {
                             let tab = *state.active_tab.read().unwrap();
-                            if tab == ActiveTab::Providers {
+                            if tab == ActiveTab::Combos {
                                 let sel_idx = *state.selected_index.read().unwrap();
-                                let target_email = {
-                                    let mut accounts_guard = state.accounts.write().unwrap();
-                                    if let Some(acc) = accounts_guard.get_mut(sel_idx) {
-                                        acc.status_text = "Testing... ⏳".to_string();
-                                        Some(acc.email.clone())
+                                let target_combo = {
+                                    let mut combos_guard = state.combos.write().unwrap();
+                                    if let Some(c) = combos_guard.get_mut(sel_idx) {
+                                        c.status_text = Some("Testing... ⏳".to_string());
+                                        Some((c.id.clone(), c.name.clone(), c.models.clone(), c.proxy_name.clone()))
                                     } else {
                                         None
                                     }
                                 };
 
-                                if let Some(email) = target_email {
+                                if let Some((cid, cname, models, p_name)) = target_combo {
                                     let state_clone = state.clone();
                                     let auth_clone = auth_mgr.clone();
                                     tokio::spawn(async move {
+                                        // Resolve proxy URL for this combo:
+                                        // 1. Combo specific assigned proxy from proxy_registry
+                                        // 2. Global --proxy arg fallback
+                                        let resolved_proxy = if let Some(ref pname) = p_name {
+                                            let proxies_guard = state_clone.proxies.read().unwrap();
+                                            proxies_guard
+                                                .iter()
+                                                .find(|p| p.name == *pname || p.id == *pname)
+                                                .map(|p| format!("{}://{}:{}", p.protocol, p.host, p.port))
+                                                .or_else(|| state_clone.proxy.clone())
+                                        } else {
+                                            state_clone.proxy.clone()
+                                        };
+
+                                        state_clone.add_log(
+                                            "INFO",
+                                            format!(
+                                                "Testing combo '{}' (models: {}, proxy: {})",
+                                                cname,
+                                                models.join(", "),
+                                                resolved_proxy.as_deref().unwrap_or("Direct")
+                                            ),
+                                        );
+
+                                        // Test the first active Google/Antigravity account with the combo's proxy
+                                        let first_acc = auth_clone.list_accounts().iter().find(|a| a.is_active).cloned();
+                                        if let Some(acc) = first_acc {
+                                            match oxiroute_auth::AntigravityAuthManager::test_account_connection(
+                                                &acc,
+                                                resolved_proxy.as_deref(),
+                                            )
+                                            .await
+                                            {
+                                                Ok(latency) => {
+                                                    if let Ok(mut combos_guard) = state_clone.combos.write() {
+                                                        if let Some(c) = combos_guard.iter_mut().find(|c| c.id == cid) {
+                                                            c.status_text = Some(format!("Healthy ● ({}ms)", latency));
+                                                        }
+                                                    }
+                                                    state_clone.add_log(
+                                                        "INFO",
+                                                        format!(
+                                                            "Combo '{}' verified healthy ({}ms latency) via {}",
+                                                            cname,
+                                                            latency,
+                                                            resolved_proxy.as_deref().unwrap_or("Direct")
+                                                        ),
+                                                    );
+                                                }
+                                                Err(err) => {
+                                                    if let Ok(mut combos_guard) = state_clone.combos.write() {
+                                                        if let Some(c) = combos_guard.iter_mut().find(|c| c.id == cid) {
+                                                            c.status_text = Some("Failed ✕".to_string());
+                                                        }
+                                                    }
+                                                    state_clone.add_log(
+                                                        "ERROR",
+                                                        format!("Combo '{}' test failed: {}", cname, err),
+                                                    );
+                                                }
+                                            }
+                                        } else {
+                                            if let Ok(mut combos_guard) = state_clone.combos.write() {
+                                                if let Some(c) = combos_guard.iter_mut().find(|c| c.id == cid) {
+                                                    c.status_text = Some("No Accounts ✕".to_string());
+                                                }
+                                            }
+                                            state_clone.add_log(
+                                                "WARN",
+                                                format!("No active accounts available to test combo '{}'", cname),
+                                            );
+                                        }
+                                    });
+                                }
+                            } else if tab == ActiveTab::Providers {
+                                let sel_idx = *state.selected_index.read().unwrap();
+                                let target_account = {
+                                    let mut accounts_guard = state.accounts.write().unwrap();
+                                    if let Some(acc) = accounts_guard.get_mut(sel_idx) {
+                                        acc.status_text = "Testing... ⏳".to_string();
+                                        Some((acc.id.clone(), acc.email.clone(), acc.provider.clone()))
+                                    } else {
+                                        None
+                                    }
+                                };
+
+                                if let Some((acc_id, email, provider)) = target_account {
+                                    let state_clone = state.clone();
+                                    let auth_clone = auth_mgr.clone();
+                                    tokio::spawn(async move {
+                                        state_clone.add_log(
+                                            "INFO",
+                                            format!(
+                                                "Dispatching live network probe for provider '{}' [{}] (Proxy: {})",
+                                                email,
+                                                provider,
+                                                state_clone.proxy.as_deref().unwrap_or("Direct")
+                                            ),
+                                        );
+
+                                        let is_google = provider == "antigravity" || provider == "agy";
                                         let acc_opt = auth_clone
                                             .list_accounts()
                                             .iter()
-                                            .find(|a| a.email == email)
+                                            .find(|a| a.id == acc_id || a.email == email)
                                             .cloned();
-                                        if let Some(acc) = acc_opt {
-                                            state_clone.add_log(
-                                                "INFO",
-                                                format!("Dispatching live network probe for account: {}", email),
-                                            );
+
+                                        if is_google && acc_opt.is_some() {
+                                            let acc = acc_opt.unwrap();
                                             match oxiroute_auth::AntigravityAuthManager::test_account_connection(
                                                 &acc,
                                                 state_clone.proxy.as_deref(),
@@ -200,7 +318,7 @@ pub fn run_tui(
                                             {
                                                 Ok(latency) => {
                                                     if let Ok(mut accounts_guard) = state_clone.accounts.write() {
-                                                        if let Some(a) = accounts_guard.iter_mut().find(|a| a.email == email) {
+                                                        if let Some(a) = accounts_guard.iter_mut().find(|a| a.id == acc_id) {
                                                             a.status_text = format!("Verified ● ({}ms)", latency);
                                                         }
                                                     }
@@ -214,13 +332,63 @@ pub fn run_tui(
                                                 }
                                                 Err(err) => {
                                                     if let Ok(mut accounts_guard) = state_clone.accounts.write() {
-                                                        if let Some(a) = accounts_guard.iter_mut().find(|a| a.email == email) {
+                                                        if let Some(a) = accounts_guard.iter_mut().find(|a| a.id == acc_id) {
                                                             a.status_text = "Failed ✕".to_string();
                                                         }
                                                     }
                                                     state_clone.add_log(
                                                         "ERROR",
                                                         format!("Real probe failed for '{}': {}", email, err),
+                                                    );
+                                                }
+                                            }
+                                        } else {
+                                            // Non-OAuth provider or API key probe: test endpoint reachability via configured proxy
+                                            let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(8));
+                                            if let Some(ref p) = state_clone.proxy {
+                                                if let Ok(proxy) = reqwest::Proxy::all(p) {
+                                                    builder = builder.proxy(proxy);
+                                                }
+                                            }
+                                            let client = builder.build().unwrap_or_default();
+                                            let test_url = match provider.as_str() {
+                                                "openrouter" => "https://openrouter.ai/api/v1/models",
+                                                "deepseek" => "https://api.deepseek.com/models",
+                                                "groq" => "https://api.groq.com/openai/v1/models",
+                                                "openai" => "https://api.openai.com/v1/models",
+                                                "anthropic" => "https://api.anthropic.com/v1/models",
+                                                _ => "https://httpbin.org/status/200",
+                                            };
+
+                                            let start = std::time::Instant::now();
+                                            match client.get(test_url).send().await {
+                                                Ok(res) => {
+                                                    let latency = start.elapsed().as_millis() as u64;
+                                                    let status = res.status().as_u16();
+                                                    let is_ok = res.status().is_success() || status == 401; // 401 means server reached and responding
+                                                    if let Ok(mut accounts_guard) = state_clone.accounts.write() {
+                                                        if let Some(a) = accounts_guard.iter_mut().find(|a| a.id == acc_id) {
+                                                            a.status_text = if is_ok {
+                                                                format!("Verified ● ({}ms)", latency)
+                                                            } else {
+                                                                format!("Status {}", status)
+                                                            };
+                                                        }
+                                                    }
+                                                    state_clone.add_log(
+                                                        "INFO",
+                                                        format!("Network probe for '{}' reached {} in {}ms", email, test_url, latency),
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    if let Ok(mut accounts_guard) = state_clone.accounts.write() {
+                                                        if let Some(a) = accounts_guard.iter_mut().find(|a| a.id == acc_id) {
+                                                            a.status_text = "Failed ✕".to_string();
+                                                        }
+                                                    }
+                                                    state_clone.add_log(
+                                                        "ERROR",
+                                                        format!("Probe network error for '{}': {}", email, e),
                                                     );
                                                 }
                                             }
@@ -301,6 +469,37 @@ pub fn run_tui(
                                 }
                             }
                         }
+                        KeyCode::Char(' ') => {
+                            let tab = *state.active_tab.read().unwrap();
+                            if tab == ActiveTab::Providers {
+                                let sel_idx = *state.selected_index.read().unwrap();
+                                let mut accounts_guard = state.accounts.write().unwrap();
+                                if let Some(acc) = accounts_guard.get_mut(sel_idx) {
+                                    acc.is_active = !acc.is_active;
+                                    acc.status_text = if acc.is_active {
+                                        "Active ●".to_string()
+                                    } else {
+                                        "Disabled ○".to_string()
+                                    };
+                                    let id = acc.id.clone();
+                                    let name = acc.name.clone();
+                                    let is_active = acc.is_active;
+                                    drop(accounts_guard);
+
+                                    if let Some(ref storage) = state.storage {
+                                        let _ = storage.update_provider_active(&id, is_active);
+                                    }
+                                    state.add_log(
+                                        "INFO",
+                                        format!(
+                                            "Toggled provider '{}' -> {} (Saved 💾)",
+                                            name,
+                                            if is_active { "Active" } else { "Disabled" }
+                                        ),
+                                    );
+                                }
+                            }
+                        }
                         KeyCode::Char('d') | KeyCode::Delete => {
                             let tab = *state.active_tab.read().unwrap();
                             let sel_idx = *state.selected_index.read().unwrap();
@@ -313,6 +512,9 @@ pub fn run_tui(
                                             "WARN",
                                             format!("Deleted combo: '{}'", removed.name),
                                         );
+                                        if let Some(ref storage) = state.storage {
+                                            let _ = storage.delete_combo(&removed.id);
+                                        }
                                     }
                                 }
                                 ActiveTab::Providers => {
@@ -323,6 +525,9 @@ pub fn run_tui(
                                             "WARN",
                                             format!("Removed provider connection: '{}'", removed.name),
                                         );
+                                        if let Some(ref storage) = state.storage {
+                                            let _ = storage.delete_provider_connection(&removed.id);
+                                        }
                                     }
                                 }
                                 ActiveTab::Proxies => {
@@ -333,6 +538,9 @@ pub fn run_tui(
                                             "WARN",
                                             format!("Deleted proxy: '{}'", removed.name),
                                         );
+                                        if let Some(ref storage) = state.storage {
+                                            let _ = storage.delete_proxy(&removed.id);
+                                        }
                                     }
                                 }
                                 _ => {}
@@ -428,6 +636,24 @@ fn handle_modal_key(state: &TuiState, code: KeyCode) {
             mut active_field,
         } => handle_provider_step(
             state,
+            None,
+            &mut provider_type_idx,
+            &mut name,
+            &mut api_key,
+            &mut priority,
+            &mut active_field,
+            code,
+        ),
+        ModalState::EditProvider {
+            account_id,
+            mut provider_type_idx,
+            mut name,
+            mut api_key,
+            mut priority,
+            mut active_field,
+        } => handle_provider_step(
+            state,
+            Some(account_id),
             &mut provider_type_idx,
             &mut name,
             &mut api_key,
@@ -581,20 +807,34 @@ fn handle_combo_step(
                         models.clone()
                     },
                     proxy_name: selected_proxy_name,
+                    status_text: None,
                 };
+
+                if let Some(ref storage) = state.storage {
+                    let rec = oxiroute_auth::ComboRecord {
+                        id: new_combo.id.clone(),
+                        name: new_combo.name.clone(),
+                        strategy: new_combo.strategy.clone(),
+                        models: new_combo.models.clone(),
+                        proxy_name: new_combo.proxy_name.clone(),
+                    };
+                    if let Err(e) = storage.save_combo(&rec) {
+                        state.add_log("ERROR", format!("Failed to save combo to disk: {}", e));
+                    }
+                }
 
                 if let Ok(mut combos) = state.combos.write() {
                     if let Some(pos) = combos.iter().position(|c| c.id == final_id) {
                         combos[pos] = new_combo;
                         state.add_log(
                             "INFO",
-                            format!("Updated combo: '{}' [{}]", name, strat_name),
+                            format!("Updated combo: '{}' [{}] (Saved 💾)", name, strat_name),
                         );
                     } else {
                         combos.push(new_combo);
                         state.add_log(
                             "INFO",
-                            format!("Created new combo: '{}' [{}]", name, strat_name),
+                            format!("Created new combo: '{}' [{}] (Saved 💾)", name, strat_name),
                         );
                     }
                 }
@@ -764,6 +1004,7 @@ fn handle_model_picker_step(
 
 fn handle_provider_step(
     state: &TuiState,
+    account_id: Option<String>,
     provider_type_idx: &mut usize,
     name: &mut String,
     api_key: &mut String,
@@ -775,23 +1016,11 @@ fn handle_provider_step(
         KeyCode::Esc => ModalState::None,
         KeyCode::Tab | KeyCode::Down => {
             *active_field = (*active_field + 1) % 4;
-            ModalState::AddProvider {
-                provider_type_idx: *provider_type_idx,
-                name: name.clone(),
-                api_key: api_key.clone(),
-                priority: *priority,
-                active_field: *active_field,
-            }
+            wrap_provider_modal(account_id, *provider_type_idx, name, api_key, *priority, *active_field)
         }
         KeyCode::BackTab | KeyCode::Up => {
             *active_field = (*active_field + 3) % 4;
-            ModalState::AddProvider {
-                provider_type_idx: *provider_type_idx,
-                name: name.clone(),
-                api_key: api_key.clone(),
-                priority: *priority,
-                active_field: *active_field,
-            }
+            wrap_provider_modal(account_id, *provider_type_idx, name, api_key, *priority, *active_field)
         }
         KeyCode::Right => {
             if *active_field == 0 {
@@ -799,13 +1028,7 @@ fn handle_provider_step(
             } else if *active_field == 3 {
                 *priority = (*priority + 1) % 3;
             }
-            ModalState::AddProvider {
-                provider_type_idx: *provider_type_idx,
-                name: name.clone(),
-                api_key: api_key.clone(),
-                priority: *priority,
-                active_field: *active_field,
-            }
+            wrap_provider_modal(account_id, *provider_type_idx, name, api_key, *priority, *active_field)
         }
         KeyCode::Left => {
             if *active_field == 0 {
@@ -817,13 +1040,7 @@ fn handle_provider_step(
             } else if *active_field == 3 {
                 *priority = if *priority == 0 { 2 } else { *priority - 1 };
             }
-            ModalState::AddProvider {
-                provider_type_idx: *provider_type_idx,
-                name: name.clone(),
-                api_key: api_key.clone(),
-                priority: *priority,
-                active_field: *active_field,
-            }
+            wrap_provider_modal(account_id, *provider_type_idx, name, api_key, *priority, *active_field)
         }
         KeyCode::Char(c) => {
             match *active_field {
@@ -831,13 +1048,7 @@ fn handle_provider_step(
                 2 => api_key.push(c),
                 _ => {}
             }
-            ModalState::AddProvider {
-                provider_type_idx: *provider_type_idx,
-                name: name.clone(),
-                api_key: api_key.clone(),
-                priority: *priority,
-                active_field: *active_field,
-            }
+            wrap_provider_modal(account_id, *provider_type_idx, name, api_key, *priority, *active_field)
         }
         KeyCode::Backspace => {
             match *active_field {
@@ -849,13 +1060,7 @@ fn handle_provider_step(
                 }
                 _ => {}
             }
-            ModalState::AddProvider {
-                provider_type_idx: *provider_type_idx,
-                name: name.clone(),
-                api_key: api_key.clone(),
-                priority: *priority,
-                active_field: *active_field,
-            }
+            wrap_provider_modal(account_id, *provider_type_idx, name, api_key, *priority, *active_field)
         }
         KeyCode::Enter => {
             let ptype = PROVIDER_TYPES[*provider_type_idx % PROVIDER_TYPES.len()].0;
@@ -864,13 +1069,56 @@ fn handle_provider_step(
             } else {
                 name.trim().to_string()
             };
+            let final_id = account_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+            let mut enc_token = None;
+            if !api_key.trim().is_empty() {
+                if let Some(ref storage) = state.storage {
+                    if let Ok(k) = storage.get_encryption_key() {
+                        enc_token = oxiroute_auth::crypto::encrypt_field(api_key.trim(), &k).ok();
+                    }
+                }
+                if enc_token.is_none() {
+                    enc_token = Some(api_key.trim().to_string());
+                }
+            }
+
+            let now_str = chrono::Utc::now().to_rfc3339();
+            let is_oauth = ptype == "antigravity" || ptype == "agy";
+            let auth_type = if is_oauth { "oauth" } else { "apikey" };
+
+            let record = oxiroute_auth::ProviderRecord {
+                id: final_id.clone(),
+                provider: ptype.to_string(),
+                auth_type: auth_type.to_string(),
+                name: Some(display_name.clone()),
+                email: Some(display_name.clone()),
+                priority: (*priority + 1) as u32,
+                is_active: true,
+                access_token: enc_token.clone(),
+                refresh_token: if is_oauth { enc_token } else { None },
+                project_id: if is_oauth { Some("aicode-consumers".to_string()) } else { None },
+                expires_at: None,
+                scope: None,
+                provider_specific_data: None,
+                created_at: Some(now_str.clone()),
+                updated_at: Some(now_str),
+            };
+
+            if let Some(ref storage) = state.storage {
+                if let Err(e) = storage.save_provider_connection(&record) {
+                    state.add_log("ERROR", format!("Failed to save provider to disk: {}", e));
+                }
+            }
 
             let new_acc = AccountDisplay {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: final_id.clone(),
                 provider: ptype.to_string(),
                 name: display_name.clone(),
                 email: if api_key.len() > 8 {
                     format!("{}****", &api_key[..4])
+                } else if !api_key.is_empty() {
+                    "****".to_string()
                 } else {
                     display_name.clone()
                 },
@@ -880,21 +1128,61 @@ fn handle_provider_step(
             };
 
             if let Ok(mut accounts) = state.accounts.write() {
-                accounts.push(new_acc);
-                state.add_log(
-                    "INFO",
-                    format!("Added provider connection: '{}' [{}] (P{})", display_name, ptype, *priority + 1),
-                );
+                if let Some(pos) = accounts.iter().position(|a| a.id == final_id) {
+                    accounts[pos] = new_acc;
+                    state.add_log(
+                        "INFO",
+                        format!(
+                            "Updated provider connection: '{}' [{}] (P{}) (Saved 💾)",
+                            display_name,
+                            ptype,
+                            *priority + 1
+                        ),
+                    );
+                } else {
+                    accounts.push(new_acc);
+                    state.add_log(
+                        "INFO",
+                        format!(
+                            "Added provider connection: '{}' [{}] (P{}) (Saved 💾)",
+                            display_name,
+                            ptype,
+                            *priority + 1
+                        ),
+                    );
+                }
             }
             ModalState::None
         }
-        _ => ModalState::AddProvider {
-            provider_type_idx: *provider_type_idx,
-            name: name.clone(),
-            api_key: api_key.clone(),
-            priority: *priority,
-            active_field: *active_field,
-        },
+        _ => wrap_provider_modal(account_id, *provider_type_idx, name, api_key, *priority, *active_field),
+    }
+}
+
+fn wrap_provider_modal(
+    account_id: Option<String>,
+    provider_type_idx: usize,
+    name: &str,
+    api_key: &str,
+    priority: usize,
+    active_field: usize,
+) -> ModalState {
+    if let Some(id) = account_id {
+        ModalState::EditProvider {
+            account_id: id,
+            provider_type_idx,
+            name: name.to_string(),
+            api_key: api_key.to_string(),
+            priority,
+            active_field,
+        }
+    } else {
+        ModalState::AddProvider {
+            provider_type_idx,
+            name: name.to_string(),
+            api_key: api_key.to_string(),
+            priority,
+            active_field,
+        }
     }
 }
 
@@ -1080,18 +1368,34 @@ fn handle_proxy_step(
                     status: "Active ●".to_string(),
                 };
 
+                if let Some(ref storage) = state.storage {
+                    let rec = oxiroute_auth::ProxyRecord {
+                        id: new_proxy.id.clone(),
+                        name: Some(new_proxy.name.clone()),
+                        protocol: new_proxy.protocol.clone(),
+                        host: new_proxy.host.clone(),
+                        port: new_proxy.port,
+                        username: None,
+                        password: None,
+                        status: "active".to_string(),
+                    };
+                    if let Err(e) = storage.save_proxy(&rec) {
+                        state.add_log("ERROR", format!("Failed to save proxy to disk: {}", e));
+                    }
+                }
+
                 if let Ok(mut proxies) = state.proxies.write() {
                     if let Some(pos) = proxies.iter().position(|p| p.id == final_id) {
                         proxies[pos] = new_proxy;
                         state.add_log(
                             "INFO",
-                            format!("Updated proxy: {}://{}:{}", proto, host, p_num),
+                            format!("Updated proxy: {}://{}:{} (Saved 💾)", proto, host, p_num),
                         );
                     } else {
                         proxies.push(new_proxy);
                         state.add_log(
                             "INFO",
-                            format!("Registered proxy: {}://{}:{}", proto, host, p_num),
+                            format!("Registered proxy: {}://{}:{} (Saved 💾)", proto, host, p_num),
                         );
                     }
                 }

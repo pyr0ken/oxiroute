@@ -231,7 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let data_dir = args.data_dir.unwrap_or_else(default_oxiroute_dir);
 
-    let storage = StorageManager::new(data_dir);
+    let storage = Arc::new(StorageManager::new(data_dir));
     storage.init()?;
 
     let auth_mgr = Arc::new(AntigravityAuthManager::load_from_omniroute_sqlite(
@@ -244,57 +244,143 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engine = Arc::new(Engine::new(args.proxy.as_deref()));
 
     let tui_state = if args.tui {
-        let state = Arc::new(TuiState::new(args.port, args.proxy.clone()));
-        let acc_displays = auth_mgr
-            .list_accounts()
-            .iter()
-            .map(|a| AccountDisplay {
-                id: a.email.clone(),
-                provider: "antigravity".to_string(),
-                name: a.email.clone(),
-                email: a.email.clone(),
-                priority: a.priority,
-                is_active: a.is_active,
-                status_text: "Active ●".to_string(),
-            })
-            .collect();
+        let state = Arc::new(TuiState::new(args.port, args.proxy.clone(), Some(storage.clone())));
+
+        // 1. Load historical burnt tokens and historical timeline from database
+        if let Ok((in_tok, out_tok, reason_tok)) = storage.get_historical_usage_totals() {
+            let total_hist = in_tok + out_tok + reason_tok;
+            state.set_historical_burned_tokens(total_hist);
+        }
+
+        if let Ok(hist_timeline) = storage.load_historical_timeline(30) {
+            for (id, ts, model, account, tokens, latency, status) in hist_timeline.into_iter().rev() {
+                state.record_historical_timeline_item(id, ts, model, account, tokens, latency, status);
+            }
+        }
+
+        // 2. Load accounts / providers from SQLite
+        let mut acc_displays = Vec::new();
+        if let Ok(providers) = storage.load_provider_connections() {
+            for p in providers {
+                let display_name = p
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| p.email.clone().unwrap_or_else(|| p.provider.clone()));
+                let email = p.email.clone().unwrap_or_else(|| display_name.clone());
+                let status_text = if p.is_active {
+                    "Active ●".to_string()
+                } else {
+                    "Disabled ○".to_string()
+                };
+                acc_displays.push(AccountDisplay {
+                    id: p.id,
+                    provider: p.provider,
+                    name: display_name,
+                    email,
+                    priority: p.priority,
+                    is_active: p.is_active,
+                    status_text,
+                });
+            }
+        }
+        if acc_displays.is_empty() {
+            acc_displays = auth_mgr
+                .list_accounts()
+                .iter()
+                .map(|a| AccountDisplay {
+                    id: a.id.clone(),
+                    provider: "antigravity".to_string(),
+                    name: a.email.clone(),
+                    email: a.email.clone(),
+                    priority: a.priority,
+                    is_active: a.is_active,
+                    status_text: "Active ●".to_string(),
+                })
+                .collect();
+        }
         state.set_accounts(acc_displays);
 
-        // Pre-populate default smart combos
-        state.set_combos(vec![
-            tui::ComboDisplay {
-                id: "c-claude-agent".to_string(),
-                name: "claude-smart-coding".to_string(),
-                strategy: "priority".to_string(),
-                models: vec![
-                    "antigravity/claude-sonnet-4-6".to_string(),
-                    "antigravity/claude-opus-4-6-thinking".to_string(),
-                    "antigravity/gemini-3.7-flash-low".to_string(),
-                ],
-                proxy_name: args.proxy.clone(),
-            },
-            tui::ComboDisplay {
-                id: "c-flash-fallback".to_string(),
-                name: "flash-speed-router".to_string(),
-                strategy: "round-robin".to_string(),
-                models: vec![
-                    "antigravity/gemini-3.7-flash-low".to_string(),
-                    "antigravity/gemini-2.5-flash".to_string(),
-                ],
-                proxy_name: None,
-            },
-        ]);
-
-        if let Some(ref _p) = args.proxy {
-            state.set_proxies(vec![tui::ProxyDisplay {
-                id: "p-default".to_string(),
-                name: "Default SOCKS5 Egress".to_string(),
-                protocol: "socks5h".to_string(),
-                host: "127.0.0.1".to_string(),
-                port: 5454,
-                status: "Active ● (Connected)".to_string(),
-            }]);
+        // 2. Load Combos from SQLite
+        let mut db_combos = storage.load_combos().unwrap_or_default();
+        if db_combos.is_empty() {
+            let default_combos = vec![
+                oxiroute_auth::ComboRecord {
+                    id: "c-claude-agent".to_string(),
+                    name: "claude-smart-coding".to_string(),
+                    strategy: "priority".to_string(),
+                    models: vec![
+                        "antigravity/claude-sonnet-4-6".to_string(),
+                        "antigravity/claude-opus-4-6-thinking".to_string(),
+                        "antigravity/gemini-3.7-flash-low".to_string(),
+                    ],
+                    proxy_name: args.proxy.clone(),
+                },
+                oxiroute_auth::ComboRecord {
+                    id: "c-flash-fallback".to_string(),
+                    name: "flash-speed-router".to_string(),
+                    strategy: "round-robin".to_string(),
+                    models: vec![
+                        "antigravity/gemini-3.7-flash-low".to_string(),
+                        "antigravity/gemini-2.5-flash".to_string(),
+                    ],
+                    proxy_name: None,
+                },
+            ];
+            for c in &default_combos {
+                let _ = storage.save_combo(c);
+            }
+            db_combos = default_combos;
         }
+        state.set_combos(
+            db_combos
+                .into_iter()
+                .map(|c| tui::ComboDisplay {
+                    id: c.id,
+                    name: c.name,
+                    strategy: c.strategy,
+                    models: c.models,
+                    proxy_name: c.proxy_name,
+                    status_text: None,
+                })
+                .collect(),
+        );
+
+        // 3. Load Proxies from SQLite
+        let mut db_proxies = storage.load_proxies().unwrap_or_default();
+        if db_proxies.is_empty() {
+            if let Some(ref _p) = args.proxy {
+                let def_proxy = oxiroute_auth::ProxyRecord {
+                    id: "p-default".to_string(),
+                    name: Some("Default SOCKS5 Egress".to_string()),
+                    protocol: "socks5h".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port: 5454,
+                    username: None,
+                    password: None,
+                    status: "active".to_string(),
+                };
+                let _ = storage.save_proxy(&def_proxy);
+                db_proxies.push(def_proxy);
+            }
+        }
+        state.set_proxies(
+            db_proxies
+                .into_iter()
+                .map(|p| tui::ProxyDisplay {
+                    id: p.id,
+                    name: p.name.unwrap_or_else(|| format!("{}:{}", p.host, p.port)),
+                    protocol: p.protocol,
+                    host: p.host,
+                    port: p.port,
+                    status: if p.status == "active" {
+                        "Active ●".to_string()
+                    } else {
+                        "Inactive ○".to_string()
+                    },
+                })
+                .collect(),
+        );
+
         Some(state)
     } else {
         None
