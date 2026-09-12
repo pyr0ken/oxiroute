@@ -63,3 +63,52 @@ pub fn decrypt_field(encrypted_str: &str, key: &[u8; 32]) -> Result<String> {
     String::from_utf8(plaintext_bytes)
         .map_err(|e| OxiError::Auth(format!("Invalid UTF-8 in decrypted field: {}", e)))
 }
+
+pub fn encrypt_field(plaintext: &str, key: &[u8; 32]) -> Result<String> {
+    use aes_gcm::aead::rand_core::{OsRng, RngCore};
+
+    let cipher = Aes256Gcm16ByteNonce::new_from_slice(key)
+        .map_err(|e| OxiError::Auth(format!("AES-GCM init error: {}", e)))?;
+
+    let mut iv = [0u8; 16];
+    OsRng.fill_bytes(&mut iv);
+    let nonce = Nonce::<U16>::from_slice(&iv);
+
+    let ciphertext_and_tag = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .map_err(|e| OxiError::Auth(format!("Encryption failed: {}", e)))?;
+
+    if ciphertext_and_tag.len() < 16 {
+        return Err(OxiError::Auth("Ciphertext too short".to_string()));
+    }
+
+    let split_pos = ciphertext_and_tag.len() - 16;
+    let ciphertext = &ciphertext_and_tag[..split_pos];
+    let tag = &ciphertext_and_tag[split_pos..];
+
+    Ok(format!(
+        "enc:v1:{}:{}:{}",
+        hex::encode(iv),
+        hex::encode(ciphertext),
+        hex::encode(tag)
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encrypt_decrypt_roundtrip() {
+        let secret = "test-secret-1234567890";
+        let key = derive_key(secret).unwrap();
+        let plaintext = "sk-ant-api03-secret-key-value-12345";
+
+        let encrypted = encrypt_field(plaintext, &key).unwrap();
+        assert!(encrypted.starts_with("enc:v1:"));
+
+        let decrypted = decrypt_field(&encrypted, &key).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+}
+
