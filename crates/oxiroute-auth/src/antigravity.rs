@@ -9,6 +9,10 @@ use crate::crypto::{decrypt_field, derive_key};
 
 pub const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 
+pub const PUBLIC_GOOGLE_CLIENT_ID: &str =
+    "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+pub const PUBLIC_GOOGLE_CLIENT_SECRET: &str = "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";
+
 #[derive(Debug, Clone)]
 pub struct AntigravityAccount {
     pub id: String,
@@ -62,7 +66,7 @@ impl AntigravityAuthManager {
         let mut stmt = conn
             .prepare(
                 "SELECT id, email, access_token, refresh_token, project_id, expires_at, is_active, priority \
-                 FROM provider_connections WHERE provider = 'antigravity' AND is_active = 1 \
+                 FROM provider_connections WHERE (provider = 'antigravity' OR provider = 'agy') AND is_active = 1 \
                  ORDER BY priority ASC",
             )
             .map_err(|e| OxiError::Auth(format!("Sqlite query prep failed: {}", e)))?;
@@ -111,9 +115,7 @@ impl AntigravityAuthManager {
         }
 
         if accounts.is_empty() {
-            return Err(OxiError::Auth(
-                "No active Antigravity accounts found in OmniRoute database".to_string(),
-            ));
+            tracing::warn!("No active Antigravity/AGY accounts found in database");
         }
 
         Ok(Self::new(accounts))
@@ -144,7 +146,7 @@ impl AntigravityAuthManager {
         account: &AntigravityAccount,
         proxy_url: Option<&str>,
     ) -> std::result::Result<u64, String> {
-        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(8));
+        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
         if let Some(p) = proxy_url {
             if let Ok(proxy) = reqwest::Proxy::all(p) {
                 builder = builder.proxy(proxy);
@@ -153,9 +155,11 @@ impl AntigravityAuthManager {
         let client = builder.build().map_err(|e| format!("Client build error: {}", e))?;
 
         let start = Instant::now();
-        // Probe Google OAuth endpoint with refresh token
+        // Probe Google OAuth endpoint with refresh token & public client credentials
         let params = [
             ("grant_type", "refresh_token"),
+            ("client_id", PUBLIC_GOOGLE_CLIENT_ID),
+            ("client_secret", PUBLIC_GOOGLE_CLIENT_SECRET),
             ("refresh_token", &account.refresh_token),
         ];
 
@@ -177,7 +181,8 @@ impl AntigravityAuthManager {
             Ok(latency_ms)
         } else {
             let status = res.status().as_u16();
-            Err(format!("HTTP status {}", status))
+            let body = res.text().await.unwrap_or_default();
+            Err(format!("HTTP {} ({})", status, body))
         }
     }
 
@@ -187,6 +192,8 @@ impl AntigravityAuthManager {
     ) -> Result<String> {
         let params = [
             ("grant_type", "refresh_token"),
+            ("client_id", PUBLIC_GOOGLE_CLIENT_ID),
+            ("client_secret", PUBLIC_GOOGLE_CLIENT_SECRET),
             ("refresh_token", &account.refresh_token),
         ];
 
