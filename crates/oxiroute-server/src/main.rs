@@ -60,40 +60,40 @@ async fn list_models() -> Json<serde_json::Value> {
         "object": "list",
         "data": [
             {
-                "id": "antigravity/claude-sonnet-4-6",
+                "id": "antigravity",
                 "object": "model",
                 "created": 1700000000,
-                "owned_by": "antigravity"
+                "owned_by": "agy"
             },
             {
-                "id": "antigravity/claude-opus-4-6-thinking",
+                "id": "claude",
                 "object": "model",
                 "created": 1700000000,
-                "owned_by": "antigravity"
+                "owned_by": "agy"
             },
             {
-                "id": "antigravity/gemini-3.7-flash-low",
+                "id": "agy/gemini-3.8-flash-high",
                 "object": "model",
                 "created": 1700000000,
-                "owned_by": "antigravity"
+                "owned_by": "agy"
             },
             {
-                "id": "antigravity/gemini-2.5-flash",
+                "id": "agy/claude-sonnet-4-6",
                 "object": "model",
                 "created": 1700000000,
-                "owned_by": "antigravity"
+                "owned_by": "agy"
+            },
+            {
+                "id": "gemini-3.8-flash-high",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "agy"
             },
             {
                 "id": "claude-sonnet-4-6",
                 "object": "model",
                 "created": 1700000000,
-                "owned_by": "antigravity"
-            },
-            {
-                "id": "gemini-2.5-flash",
-                "object": "model",
-                "created": 1700000000,
-                "owned_by": "antigravity"
+                "owned_by": "agy"
             }
         ]
     }))
@@ -405,25 +405,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if db_combos.is_empty() {
             let default_combos = vec![
                 oxiroute_auth::ComboRecord {
-                    id: "c-claude-agent".to_string(),
-                    name: "claude-smart-coding".to_string(),
-                    strategy: "priority".to_string(),
+                    id: "c-antigravity-38".to_string(),
+                    name: "antigravity".to_string(),
+                    strategy: "least-used".to_string(),
                     models: vec![
-                        "antigravity/claude-sonnet-4-6".to_string(),
-                        "antigravity/claude-opus-4-6-thinking".to_string(),
-                        "antigravity/gemini-3.7-flash-low".to_string(),
+                        "agy/gemini-3.8-flash-high".to_string(),
+                        "agy/gemini-3.8-flash-high".to_string(),
                     ],
                     proxy_name: args.proxy.clone(),
                 },
                 oxiroute_auth::ComboRecord {
-                    id: "c-flash-fallback".to_string(),
-                    name: "flash-speed-router".to_string(),
-                    strategy: "round-robin".to_string(),
+                    id: "c-claude-agent".to_string(),
+                    name: "claude".to_string(),
+                    strategy: "least-used".to_string(),
                     models: vec![
-                        "antigravity/gemini-3.7-flash-low".to_string(),
-                        "antigravity/gemini-2.5-flash".to_string(),
+                        "agy/claude-sonnet-4-6".to_string(),
+                        "agy/claude-sonnet-4-6".to_string(),
                     ],
-                    proxy_name: None,
+                    proxy_name: args.proxy.clone(),
                 },
             ];
             for c in &default_combos {
