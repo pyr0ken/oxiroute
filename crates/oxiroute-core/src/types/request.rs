@@ -34,7 +34,7 @@ pub struct ThinkingConfig {
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<Message>,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -50,8 +50,4 @@ pub struct ChatRequest {
     pub thinking: Option<ThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-}
-
-fn default_true() -> bool {
-    true
 }
