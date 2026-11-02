@@ -523,3 +523,191 @@ impl AntigravityTranslator {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxiroute_core::{
+        FunctionCall, FunctionDefinition, Message, MessageContent, ToolCall, ToolDefinition,
+    };
+
+    #[test]
+    fn test_clean_schema_for_gemini() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100,
+                    "format": "shell",
+                    "default": "uptime"
+                }
+            },
+            "required": ["command", "nonexistent"],
+            "additionalProperties": false,
+            "strict": true
+        });
+
+        clean_schema_for_gemini(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        let cmd = &schema["properties"]["command"];
+        assert_eq!(cmd["type"], "string");
+        assert!(cmd.get("minLength").is_none());
+        assert!(cmd.get("maxLength").is_none());
+        assert!(cmd.get("format").is_none());
+        assert!(cmd.get("default").is_none());
+        assert!(schema.get("additionalProperties").is_none());
+        assert!(schema.get("strict").is_none());
+        assert_eq!(schema["required"], serde_json::json!(["command"]));
+    }
+
+    #[test]
+    fn test_clean_schema_empty_object_placeholder() {
+        let mut schema = serde_json::json!({
+            "type": "object",
+            "properties": {}
+        });
+
+        clean_schema_for_gemini(&mut schema);
+
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"].get("reason").is_some());
+        assert_eq!(schema["required"], serde_json::json!(["reason"]));
+    }
+
+    #[test]
+    fn test_build_envelope_with_tools_and_tool_calls() {
+        let req = ChatRequest {
+            model: "claude".to_string(),
+            messages: vec![
+                Message {
+                    role: Role::User,
+                    content: MessageContent::Text("What is the uptime?".to_string()),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Text("Checking now".to_string()),
+                    name: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_abc123".to_string(),
+                        kind: "function".to_string(),
+                        function: FunctionCall {
+                            name: "terminal".to_string(),
+                            arguments: "{\"command\":\"uptime\"}".to_string(),
+                        },
+                    }]),
+                    tool_call_id: None,
+                },
+                Message {
+                    role: Role::Tool,
+                    content: MessageContent::Text("up 2 days".to_string()),
+                    name: None,
+                    tool_calls: None,
+                    tool_call_id: Some("call_abc123".to_string()),
+                },
+            ],
+            stream: true,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            tools: Some(vec![ToolDefinition {
+                kind: "function".to_string(),
+                function: FunctionDefinition {
+                    name: "terminal".to_string(),
+                    description: Some("Run shell command".to_string()),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "command": { "type": "string" }
+                        },
+                        "required": ["command"]
+                    }),
+                },
+            }]),
+            tool_choice: None,
+            thinking: None,
+            user: None,
+        };
+
+        let env = AntigravityTranslator::build_envelope(&req, "claude", "test-project").unwrap();
+
+        // 1. Verify model
+        assert_eq!(env.model, "claude-sonnet-4-6");
+
+        // 2. Verify tools in inner request
+        let tools = env.request.tools.expect("Tools should be present");
+        assert_eq!(tools.len(), 1);
+        let decls = tools[0].function_declarations.as_ref().unwrap();
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].name, "terminal");
+        assert_eq!(decls[0].description, "Run shell command");
+
+        // 3. Verify toolConfig
+        assert!(env.request.tool_config.is_some());
+
+        // 4. Verify contents and roles
+        let contents = env.request.contents;
+        assert_eq!(contents.len(), 3);
+
+        // Turn 0: User
+        assert_eq!(contents[0].role, "user");
+        assert_eq!(contents[0].parts[0].text.as_deref(), Some("What is the uptime?"));
+
+        // Turn 1: Model with functionCall
+        assert_eq!(contents[1].role, "model");
+        assert_eq!(contents[1].parts[0].text.as_deref(), Some("Checking now"));
+        assert!(contents[1].parts[1].function_call.is_some());
+        assert_eq!(contents[1].parts[1].function_call.as_ref().unwrap().name, "terminal");
+        assert_eq!(
+            contents[1].parts[1].thought_signature.as_deref(),
+            Some("skip_thought_signature_validator")
+        );
+
+        // Turn 2: User with functionResponse
+        assert_eq!(contents[2].role, "user");
+        assert!(contents[2].parts[0].function_response.is_some());
+        let fn_resp = contents[2].parts[0].function_response.as_ref().unwrap();
+        assert_eq!(fn_resp.name, "terminal");
+        assert_eq!(fn_resp.response["result"], "up 2 days");
+    }
+
+    #[test]
+    fn test_parse_chunk_function_call() {
+        let raw = serde_json::json!({
+            "response": {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "functionCall": {
+                                        "name": "terminal",
+                                        "args": {
+                                            "command": "uptime"
+                                        }
+                                    }
+                                }
+                            ]
+                        },
+                        "finishReason": "STOP"
+                    }
+                ]
+            }
+        })
+        .to_string();
+
+        let chunk = AntigravityTranslator::parse_chunk(&raw, "claude", "chunk-1")
+            .unwrap()
+            .expect("Chunk should be Some");
+
+        assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("tool_calls"));
+        let tcs = chunk.choices[0].delta.tool_calls.as_ref().expect("tool_calls present");
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].function.name.as_deref(), Some("terminal"));
+        assert_eq!(tcs[0].function.arguments, "{\"command\":\"uptime\"}");
+    }
+}
