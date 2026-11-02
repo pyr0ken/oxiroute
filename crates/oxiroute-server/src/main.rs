@@ -13,7 +13,7 @@ use axum::{
 use clap::Parser;
 use futures_util::StreamExt;
 use oxiroute_auth::{default_oxiroute_dir, AntigravityAuthManager, StorageManager};
-use oxiroute_core::ChatRequest;
+use oxiroute_core::{ChatRequest, ChatResponse, Choice, Message, Usage};
 use oxiroute_engine::{Engine, PromptCompactor};
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -161,6 +161,106 @@ async fn chat_completions(
                     model_name,
                     active_account
                 );
+            }
+
+            if !request.stream {
+                let mut full_content = String::new();
+                let mut finish_reason = Some("stop".to_string());
+                let mut chunk_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+                let mut created = chrono::Utc::now().timestamp();
+                let mut accumulated_tool_calls: Vec<oxiroute_core::ToolCall> = Vec::new();
+                let mut pinned_stream = Box::pin(stream);
+
+                while let Some(res) = pinned_stream.next().await {
+                    match res {
+                        Ok(chunk) => {
+                            chunk_id = chunk.id;
+                            created = chunk.created;
+                            if let Some(first_choice) = chunk.choices.first() {
+                                if let Some(ref text) = first_choice.delta.content {
+                                    full_content.push_str(text);
+                                }
+                                if let Some(ref tcs) = first_choice.delta.tool_calls {
+                                    for tc in tcs {
+                                        accumulated_tool_calls.push(oxiroute_core::ToolCall {
+                                            id: tc.id.clone().unwrap_or_else(|| {
+                                                format!("call_{}", uuid::Uuid::new_v4().simple())
+                                            }),
+                                            kind: tc.kind.clone().unwrap_or_else(|| "function".to_string()),
+                                            function: oxiroute_core::FunctionCall {
+                                                name: tc.function.name.clone().unwrap_or_default(),
+                                                arguments: tc.function.arguments.clone(),
+                                            },
+                                        });
+                                    }
+                                }
+                                if let Some(ref reason) = first_choice.finish_reason {
+                                    finish_reason = Some(reason.clone());
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let latency_ms = start_time.elapsed().as_millis() as u64;
+                            if let Some(ref tui) = tui_ref {
+                                tui.record_request_end(&model_name, "failed", 0, latency_ms, 502);
+                                tui.add_log("ERROR", format!("Execution failed: {}", e));
+                            } else {
+                                tracing::error!("Stream error during aggregation: {}", e);
+                            }
+                            return (
+                                StatusCode::BAD_GATEWAY,
+                                Json(serde_json::json!({
+                                    "error": {
+                                        "message": e.to_string(),
+                                        "type": "provider_error"
+                                    }
+                                })),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
+
+                let latency_ms = start_time.elapsed().as_millis() as u64;
+                if let Some(ref tui) = tui_ref {
+                    tui.record_request_end(&model_for_done, &acc_for_done, 50, latency_ms, 200);
+                    tui.add_log("INFO", format!("Request completed in {}ms", latency_ms));
+                }
+
+                if !accumulated_tool_calls.is_empty() {
+                    finish_reason = Some("tool_calls".to_string());
+                }
+
+                let response = ChatResponse {
+                    id: chunk_id,
+                    object: "chat.completion".to_string(),
+                    created,
+                    model: model_for_done,
+                    choices: vec![Choice {
+                        index: 0,
+                        message: Message {
+                            role: oxiroute_core::Role::Assistant,
+                            content: oxiroute_core::MessageContent::Text(full_content),
+                            name: None,
+                            tool_calls: if accumulated_tool_calls.is_empty() {
+                                None
+                            } else {
+                                Some(accumulated_tool_calls)
+                            },
+                            tool_call_id: None,
+                        },
+                        finish_reason,
+                    }],
+                    usage: Some(Usage {
+                        prompt_tokens: 10,
+                        completion_tokens: 10,
+                        total_tokens: 20,
+                        prompt_tokens_details: None,
+                        completion_tokens_details: None,
+                    }),
+                };
+
+                return (StatusCode::OK, Json(response)).into_response();
             }
 
             let sse_stream = stream.map(move |res| match res {
