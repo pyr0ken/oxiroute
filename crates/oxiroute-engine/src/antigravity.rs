@@ -7,8 +7,8 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYP
 use uuid::Uuid;
 
 pub const ENDPOINTS: &[&str] = &[
-    "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
     "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
 ];
 
 pub struct AntigravityExecutor {
@@ -56,7 +56,9 @@ impl AntigravityExecutor {
         headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
         headers.insert(
             USER_AGENT,
-            HeaderValue::from_static("antigravity/ide/0.1.0 darwin/arm64"),
+            HeaderValue::from_static(
+                "antigravity/cli/1.1.5 (aidev_client; os_type=darwin; arch=arm64; auth_method=consumer)",
+            ),
         );
 
         let response = self
